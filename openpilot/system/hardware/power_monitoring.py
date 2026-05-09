@@ -112,7 +112,7 @@ class PowerMonitoring:
     return offroad_time > MAX_TIME_OFFROAD_S
 
   # See if we need to shutdown
-  def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None, started_seen: bool):
+  def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None, started_seen: bool, wifi_connected: bool = True):
     if offroad_timestamp is None:
       return False
 
@@ -129,5 +129,9 @@ class PowerMonitoring:
     should_shutdown &= in_car
     should_shutdown &= offroad_time > DELAY_SHUTDOWN_TIME_S
     should_shutdown |= self.params.get_bool("ForcePowerDown")
+    # No WiFi means no sync will happen: shutdown after 300s offroad (same as normal delay)
+    no_wifi_shutdown = (not wifi_connected and offroad_time > DELAY_SHUTDOWN_TIME_S
+                        and not ignition and not self.params.get_bool("DisablePowerDown") and in_car)
+    should_shutdown |= no_wifi_shutdown
     should_shutdown &= started_seen or (now > MIN_ON_TIME_S)
     return should_shutdown
