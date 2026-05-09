@@ -8,7 +8,7 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
-LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
+LANE_CHANGE_SPEED_MIN = 65 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
 DESIRES = {
