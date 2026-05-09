@@ -44,7 +44,8 @@ V_CRUISE_UNSET = 255.
 CRUISE_BUTTONS_PLUS = (ButtonType.accelCruise, ButtonType.resumeCruise)
 CRUISE_BUTTONS_MINUS = (ButtonType.decelCruise, ButtonType.setCruise)
 CRUISE_BUTTON_CONFIRM_HOLD = 0.5  # secs.
-
+CONFIRM_DELTA_THRESHOLD = 35  # km/h - max delta before requiring confirmation
+SKIP_LIMIT_THRESHOLD_KPH = 30  # km/h - speed bump zone limit that can be skipped with minus button
 
 class SpeedLimitAssist:
   _speed_limit_final_last: float
@@ -93,6 +94,9 @@ class SpeedLimitAssist:
     self._minus_hold = 0.
     self._release_toggle_prev = 0
 
+    self._speed_limit_skip_target: float = 0.  # previous limit (with offset) to revert to when skipping bump zone
+    self._skip_limit_active: bool = False
+
     # TODO-SP: SLA's own output_a_target for planner
     # Solution functions mapped to respective states
     self.acceleration_solutions = {
@@ -128,6 +132,8 @@ class SpeedLimitAssist:
 
   def get_v_target_from_control(self) -> float:
     if self._has_speed_limit:
+      if self._skip_limit_active and self._speed_limit_skip_target > 0:
+        return self._speed_limit_skip_target
       if self.pcm_op_long and self.is_enabled:
         return self._speed_limit_final_last
       if not self.pcm_op_long and self.is_active:
@@ -139,6 +145,9 @@ class SpeedLimitAssist:
   # TODO-SP: SLA's own output_a_target for planner
   def get_a_target_from_control(self) -> float:
     return self.a_ego
+
+  def _is_at_skip_threshold(self, speed_ms: float) -> bool:
+    return 0 < round(speed_ms * CV.MS_TO_KPH) <= SKIP_LIMIT_THRESHOLD_KPH
 
   def update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
@@ -152,10 +161,18 @@ class SpeedLimitAssist:
     if not released:
       return
     now = time.monotonic()
+    # L'amont lit desormais les boutons par masque de bits ; nos deux conditions
+    # (sortie et entree du saut de limite) s'y greffent telles quelles.
     if any((released >> b) & 1 for b in CRUISE_BUTTONS_PLUS):
       self._plus_hold = max(self._plus_hold, now + CRUISE_BUTTON_CONFIRM_HOLD)
+      if self._skip_limit_active:
+        self._skip_limit_active = False
     if any((released >> b) & 1 for b in CRUISE_BUTTONS_MINUS):
       self._minus_hold = max(self._minus_hold, now + CRUISE_BUTTON_CONFIRM_HOLD)
+      if (self.state in ACTIVE_STATES
+          and self._is_at_skip_threshold(self._speed_limit)
+          and self._speed_limit_skip_target > 0):
+        self._skip_limit_active = True
 
   def _get_button_release(self, req_plus: bool, req_minus: bool) -> bool:
     now = time.monotonic()
@@ -192,14 +209,10 @@ class SpeedLimitAssist:
 
   @property
   def apply_confirm_speed_threshold(self) -> bool:
-    # below CST: always require user confirmation
-    if self.v_cruise_cluster_below_confirm_speed_threshold:
-      return True
-
-    # at/above CST:
-    # - new speed limit >= CST: auto change
-    # - new speed limit < CST: user confirmation required
-    return bool(self.speed_limit_final_last_conv < CONFIRM_SPEED_THRESHOLD[self.is_metric])
+    speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
+    reference = self.prev_speed_limit_final_last_conv if self.prev_speed_limit_final_last_conv > 0 else (self.v_ego * speed_conv)
+    delta = reference - self.speed_limit_final_last_conv
+    return delta > CONFIRM_DELTA_THRESHOLD
 
   def get_current_acceleration_as_target(self) -> float:
     return self.a_ego
@@ -245,7 +258,7 @@ class SpeedLimitAssist:
       else:
         # ACTIVE
         if self.state == SpeedLimitAssistState.active:
-          if self.v_cruise_cluster_changed:
+          if self.v_cruise_cluster_changed and not self._skip_limit_active:
             self.state = SpeedLimitAssistState.inactive
           elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
             self.state = SpeedLimitAssistState.preActive
@@ -255,7 +268,7 @@ class SpeedLimitAssist:
 
         # ADAPTING
         elif self.state == SpeedLimitAssistState.adapting:
-          if self.v_cruise_cluster_changed:
+          if self.v_cruise_cluster_changed and not self._skip_limit_active:
             self.state = SpeedLimitAssistState.inactive
           elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
             self.state = SpeedLimitAssistState.preActive
@@ -316,7 +329,7 @@ class SpeedLimitAssist:
       else:
         # ACTIVE
         if self.state == SpeedLimitAssistState.active:
-          if self.v_cruise_cluster_changed:
+          if self.v_cruise_cluster_changed and not self._skip_limit_active:
             self.state = SpeedLimitAssistState.inactive
 
           elif self.speed_limit_changed and self.apply_confirm_speed_threshold:
@@ -381,6 +394,16 @@ class SpeedLimitAssist:
 
   def update(self, long_enabled: bool, long_override: bool, v_ego: float, a_ego: float, v_cruise_cluster: float, speed_limit: float,
              speed_limit_final_last: float, has_speed_limit: bool, distance: float, events_sp: EventsSP) -> None:
+    # Speed bump zone skip: detect transition to/from 30 km/h before updating stored values
+    if self._speed_limit > 0 and speed_limit > 0:
+      entering_skip_zone = self._is_at_skip_threshold(speed_limit) and not self._is_at_skip_threshold(self._speed_limit)
+      leaving_skip_zone = not self._is_at_skip_threshold(speed_limit) and self._is_at_skip_threshold(self._speed_limit)
+      if entering_skip_zone and self._speed_limit_final_last > 0:
+        self._speed_limit_skip_target = self._speed_limit_final_last
+      elif leaving_skip_zone:
+        self._skip_limit_active = False
+        self._speed_limit_skip_target = 0.
+
     self.long_enabled = long_enabled
     self.v_ego = v_ego
     self.a_ego = a_ego
