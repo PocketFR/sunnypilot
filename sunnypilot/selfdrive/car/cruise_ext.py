@@ -63,6 +63,8 @@ class VCruiseHelperSP:
     self.prev_speed_limit_final_last_kph = 0.
     self.req_plus = False
     self.req_minus = False
+    self.sla_v_target_ms: float = 0.
+    self.sla_v_target_kph: float = 0.
 
   def read_custom_set_speed_params(self) -> None:
     self.custom_acc_enabled = self.params.get_bool("CustomAccIncrementsEnabled")
@@ -109,10 +111,13 @@ class VCruiseHelperSP:
 
   def update_speed_limit_assist(self, is_metric, LP_SP: custom.LongitudinalPlanSP) -> None:
     resolver = LP_SP.speedLimit.resolver
+    assist = LP_SP.speedLimit.assist
     self.has_speed_limit = resolver.speedLimitValid or resolver.speedLimitLastValid
-    self.speed_limit_final_last = LP_SP.speedLimit.resolver.speedLimitFinalLast
+    self.speed_limit_final_last = resolver.speedLimitFinalLast
     self.speed_limit_final_last_kph = self.speed_limit_final_last * CV.MS_TO_KPH
-    self.sla_state = LP_SP.speedLimit.assist.state
+    self.sla_state = assist.state
+    self.sla_v_target_ms = assist.vTarget
+    self.sla_v_target_kph = self.sla_v_target_ms * CV.MS_TO_KPH
     self.req_plus, self.req_minus = compare_cluster_target(self.v_cruise_cluster_kph * CV.KPH_TO_MS,
                                                            self.speed_limit_final_last, is_metric)
 
@@ -130,9 +135,13 @@ class VCruiseHelperSP:
     return False
 
   def update_speed_limit_assist_v_cruise_non_pcm(self) -> None:
-    if self.sla_state in SLA_ACTIVE_STATES and (self.prev_sla_state not in SLA_ACTIVE_STATES or
-                                                self.update_speed_limit_final_last_changed):
-      self.v_cruise_kph = np.clip(round(self.speed_limit_final_last_kph, 1), self.v_cruise_min, V_CRUISE_MAX)
+    if self.sla_state in SLA_ACTIVE_STATES:
+      if self.prev_sla_state not in SLA_ACTIVE_STATES or self.update_speed_limit_final_last_changed:
+        self.v_cruise_kph = np.clip(round(self.speed_limit_final_last_kph, 1), self.v_cruise_min, V_CRUISE_MAX)
+      elif (0 < self.sla_v_target_ms < 200
+            and round(self.sla_v_target_kph) != round(self.speed_limit_final_last_kph)):
+        # Speed bump skip active: SLA targets previous limit instead of current 30 km/h zone
+        self.v_cruise_kph = np.clip(round(self.sla_v_target_kph, 1), self.v_cruise_min, V_CRUISE_MAX)
 
     self.prev_sla_state = self.sla_state
     self.prev_speed_limit_final_last_kph = self.speed_limit_final_last_kph

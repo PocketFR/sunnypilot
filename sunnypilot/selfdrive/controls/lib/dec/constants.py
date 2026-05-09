@@ -5,11 +5,9 @@ class WMACConstants:
 
   # Slow down detection parameters
   SLOW_DOWN_WINDOW_SIZE = 5  # Responsive but stable
-  SLOW_DOWN_PROB = 0.3  # Balanced threshold for slow down scenarios
-
-  # Optimized slow down distance curve - smooth and progressive
-  SLOW_DOWN_BP = [0., 10., 20., 30., 40., 50., 55., 60.]
-  SLOW_DOWN_DIST = [32., 46., 64., 86., 108., 130., 145., 165.]
+  SLOW_DOWN_PROB = 0.25  # Slightly more sensitive for rural roads with curves
+  SLOW_DOWN_BP =   [0.,  10.,  20.,  30.,  40.,  50.,  55.,  60.,  70.,  80.,  90.]
+  SLOW_DOWN_DIST = [32., 46., 64., 86., 108., 130., 145., 165., 185., 210., 240.]
 
   # Slowness detection parameters
   SLOWNESS_WINDOW_SIZE = 10  # Stable slowness detection
