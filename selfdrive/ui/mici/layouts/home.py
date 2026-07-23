@@ -1,4 +1,5 @@
 import datetime
+import os
 import time
 
 from cereal import log
@@ -15,6 +16,13 @@ from openpilot.system.version import RELEASE_BRANCHES
 HEAD_BUTTON_FONT_SIZE = 40
 HOME_PADDING = 8
 ALERTS_ZONE_WIDTH = 180
+
+# custom logo
+LOGO_PATH = "/data/aperture_ui.png"
+LOGO_RESERVED_HEIGHT = 70  # place réservée : barre d'icônes + commit en bas
+LOGO_TINT = rl.WHITE  # rl.Color(255, 255, 255, 180) pour tamiser
+COMMIT_FONT_SIZE = 24
+COMMIT_MARGIN_BOTTOM = 4
 
 NetworkType = log.DeviceState.NetworkType
 
@@ -147,7 +155,6 @@ class MiciHomeLayout(Widget):
     self._alerts_pill = AlertsPill()
 
     self._status_bar_layout = HBoxLayout([
-      IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9),
       NetworkIcon(),
       self._experimental_icon,
       self._egpu_icon,
@@ -156,12 +163,22 @@ class MiciHomeLayout(Widget):
       self._mic_icon,
     ], spacing=18)
 
+    # labels conservés instanciés (diff minimal vs upstream), seul _version_commit_label est rendu
     self._openpilot_label = UnifiedLabel("sunnypilot", font_size=96, font_weight=FontWeight.DISPLAY, max_width=480, wrap_text=False)
     self._version_label = UnifiedLabel("", font_size=36, font_weight=FontWeight.ROMAN, max_width=480, wrap_text=False)
     self._large_version_label = UnifiedLabel("", font_size=64, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, max_width=480, wrap_text=False)
     self._date_label = UnifiedLabel("", font_size=36, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, max_width=480, wrap_text=False)
     self._branch_label = UnifiedLabel("", font_size=36, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, scroll=True)
-    self._version_commit_label = UnifiedLabel("", font_size=36, text_color=rl.GRAY, font_weight=FontWeight.ROMAN, max_width=480, wrap_text=False)
+    self._version_commit_label = UnifiedLabel("", font_size=COMMIT_FONT_SIZE, text_color=rl.GRAY, font_weight=FontWeight.ROMAN,
+                                              max_width=480, wrap_text=False)
+
+    # logo perso
+    self._logo_txt = None
+    if os.path.exists(LOGO_PATH):
+      txt = rl.load_texture(LOGO_PATH)
+      if txt.id != 0:
+        rl.set_texture_filter(txt, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
+        self._logo_txt = txt
 
   def _update_state(self):
     if self.is_pressed and not self._is_pressed_prev:
@@ -218,33 +235,13 @@ class MiciHomeLayout(Widget):
     return version, branch, commit[:7], date_str
 
   def _render(self, _):
-    # TODO: why is there extra space here to get it to be flush?
-    text_pos = rl.Vector2(self.rect.x - 2 + HOME_PADDING, self.rect.y - 16)
-    self._openpilot_label.set_position(text_pos.x, text_pos.y)
-    self._openpilot_label.render()
-
-    if self._version_text is not None:
-      # release branch
-      release_branch = self._version_text[1] in RELEASE_BRANCHES
-      version_pos = rl.Rectangle(text_pos.x, text_pos.y + self._openpilot_label.font_size + 16, 100, 44)
-      self._version_label.set_text(self._version_text[0])
-      self._version_label.set_position(version_pos.x, version_pos.y)
-      self._version_label.render()
-
-      self._date_label.set_text(" " + self._version_text[3])
-      self._date_label.set_position(version_pos.x + self._version_label.text_width + 10, version_pos.y)
-      self._date_label.render()
-
-      self._branch_label.set_max_width(gui_app.width - self._version_label.text_width - self._date_label.text_width - 32)
-      self._branch_label.set_text(" " + ("release" if release_branch else self._version_text[1]))
-      self._branch_label.set_position(version_pos.x + self._version_label.text_width + self._date_label.text_width + 20, version_pos.y)
-      self._branch_label.render()
-
-      if not release_branch:
-        # 2nd line
-        self._version_commit_label.set_text(self._version_text[2])
-        self._version_commit_label.set_position(version_pos.x, version_pos.y + self._date_label.font_size + 7)
-        self._version_commit_label.render()
+    # ***** logo perso centré *****
+    if self._logo_txt is not None:
+      scale = min((self.rect.width - 2 * HOME_PADDING) / self._logo_txt.width,
+                  (self.rect.height - LOGO_RESERVED_HEIGHT) / self._logo_txt.height)
+      logo_x = self.rect.x + (self.rect.width - self._logo_txt.width * scale) / 2
+      logo_y = self.rect.y + (self.rect.height - self._logo_txt.height * scale) / 2
+      rl.draw_texture_ex(self._logo_txt, rl.Vector2(logo_x, logo_y), 0.0, scale, LOGO_TINT)
 
     # ***** Center-aligned bottom section icons *****
     self._experimental_icon.set_visible(ui_state.experimental_mode)
@@ -260,3 +257,11 @@ class MiciHomeLayout(Widget):
     self._alerts_pill.set_position(self.rect.x + self.rect.width - self._alerts_pill.rect.width - HOME_PADDING,
                                    self.rect.y + self.rect.height - self._alerts_pill.rect.height)
     self._alerts_pill.render()
+
+    # ***** commit hash (bas à droite, rendu en dernier pour rester au-dessus) *****
+    if self._version_text is not None:
+      self._version_commit_label.set_text(self._version_text[2])
+      commit_x = self.rect.x + self.rect.width - self._version_commit_label.text_width - HOME_PADDING
+      commit_y = self.rect.y + self.rect.height - COMMIT_FONT_SIZE - COMMIT_MARGIN_BOTTOM
+      self._version_commit_label.set_position(commit_x, commit_y)
+      self._version_commit_label.render()

@@ -68,8 +68,8 @@ class Alert:
 
 # Pre-defined alert instances
 ALERT_STARTUP_PENDING = Alert(
-  text1="sunnypilot Unavailable",
-  text2="Waiting to start",
+  text1="Waiting to start",
+  text2="",
   size=AlertSize.mid,
   status=AlertStatus.normal,
 )
