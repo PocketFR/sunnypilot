@@ -777,11 +777,6 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   EventName.reverseGear: {
-    ET.PERMANENT: Alert(
-      "Reverse\nGear",
-      "",
-      AlertStatus.normal, AlertSize.full,
-      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
     ET.USER_DISABLE: ImmediateDisableAlert("Reverse Gear"),
     ET.NO_ENTRY: NoEntryAlert("Reverse Gear"),
   },
@@ -893,11 +888,6 @@ if HARDWARE.get_device_type() == 'mici':
       ET.NO_ENTRY: NoEntryAlert("Calibrating"),
     },
     EventName.reverseGear: {
-      ET.PERMANENT: Alert(
-        "Reverse",
-        "",
-        AlertStatus.normal, AlertSize.full,
-        Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2, creation_delay=0.5),
       ET.USER_DISABLE: ImmediateDisableAlert("Reverse"),
       ET.NO_ENTRY: NoEntryAlert("Reverse"),
     },
