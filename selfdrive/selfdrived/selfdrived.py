@@ -30,6 +30,7 @@ from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+from openpilot.sunnypilot.selfdrive.selfdrived.override_guard import OverrideGuard
 
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
@@ -122,6 +123,7 @@ class SelfdriveD(CruiseHelper):
     self.CS_prev = car.CarState.new_message()
     self.AM = AlertManager()
     self.events = Events()
+    self.override_guard = OverrideGuard()
 
     self.initialized = False
     self.enabled = False
@@ -544,7 +546,9 @@ class SelfdriveD(CruiseHelper):
     alerts = self.events.create_alerts(self.state_machine.current_alert_types, callback_args)
     alerts_sp = self.events_sp.create_alerts(self.state_machine.current_alert_types, callback_args)
 
-    self.AM.add_many(self.sm.frame, alerts + alerts_sp)
+    self.override_guard.update(CS, self.sm, self.enabled, self.CP)
+
+    self.AM.add_many(self.sm.frame, alerts + alerts_sp + self.override_guard.alerts())
     self.AM.process_alerts(self.sm.frame, clear_event_types)
 
   def publish_selfdriveState(self, CS):
