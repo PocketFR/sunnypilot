@@ -57,7 +57,11 @@ class OverrideGuard:
   HEADWAY_ADVISORY = 1.2  # s
   HEADWAY_WARNING = 0.9   # s
   TTC_WARNING = 4.0       # s
-  V_MIN = 5.0             # m/s, pas de garde-fou en manoeuvre
+  # 3.0 m/s (~11 km/h) : un choc arriere a 10-15 km/h de vitesse de
+  # rapprochement fait deja des degats, donc on reste actif bas. Mesure sur
+  # 81 min de logs : passer de 5.0 a 3.0 ne change aucun declenchement, la
+  # condition d'appui continu >5 s n'etant pas remplie dans les bouchons.
+  V_MIN = 3.0             # m/s, en dessous on considere une manoeuvre
   PROB_MIN = 0.5          # confiance minimale sur la cible
 
   # l'advisory est informatif: on l'affiche brievement puis on le rearme, pour
