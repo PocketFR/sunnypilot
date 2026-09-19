@@ -42,6 +42,12 @@ OTHER_ECUS = {0x7E1: "trans", 0x7D0: "scc", 0x7D1: "abs", 0x7D4: "eps",
 CLUSTER_ECU = 0x7C6
 ODO_DID = 0xB002
 ODO_OFFSET = 6
+# Releve brut des blocs KWP2000 (service 0x21) des calculateurs hybrides, a chaque
+# demarrage, avec l'odometre. Sert a identifier les compteurs de distance thermique /
+# electrique par difference entre deux trajets : un compteur de distance augmente
+# exactement comme l'odometre. Temporaire, a retirer une fois les champs identifies.
+SNAPSHOT_PATH = "/data/dtc_snapshots.jsonl"
+KWP_ECUS = (0x7E2, 0x7E3, 0x7E4, 0x7E5)
 SCAN_TIMEOUT = 30.
 LETTERS = "PCBU"
 
@@ -167,6 +173,20 @@ def _run(do_clear: bool) -> dict:
         status["odometer_km"] = int.from_bytes(d[ODO_OFFSET:ODO_OFFSET + 3], "big")
     except Exception:
       pass
+
+    snap: dict = {"time": status["time"], "odometer_km": status.get("odometer_km")}
+    for addr in KWP_ECUS:
+      kwp = UdsClient(p, addr, bus=BUS, timeout=0.3, tx_timeout=0.3)
+      for lid in range(0x01, 0x09):
+        try:
+          snap["0x%03X_21%02X" % (addr, lid)] = kwp._uds_request(0x21, subfunction=lid).hex()  # noqa: SLF001
+        except Exception:
+          pass
+    try:
+      with open(SNAPSHOT_PATH, "a") as f:
+        f.write(json.dumps(snap) + "\n")
+    except OSError:
+      pass
   except Exception as e:
     status["error"] = "%s: %s" % (type(e).__name__, e)
   finally:
@@ -200,8 +220,9 @@ def main() -> int:
     pass
 
   if status["ok"]:
-    _log("voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s" % (
-      "ALLUME" if status["mil"] else "eteint", status["stored"] or "-", status["pending"] or "-",
+    _log("%s km | voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s" % (
+      status.get("odometer_km", "?"), "ALLUME" if status["mil"] else "eteint",
+      status["stored"] or "-", status["pending"] or "-",
       status["confirmed"] or "-", status["failed_since_clear"] or "-"))
   else:
     _log("lecture impossible : %s" % status["error"])
