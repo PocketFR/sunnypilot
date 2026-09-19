@@ -15,6 +15,7 @@ from openpilot.common.text_window import TextWindow
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.system.manager.helpers import unblock_stdout, save_bootlog
 from openpilot.system.manager.process import ensure_running
+from openpilot.sunnypilot.selfdrive.diagnostics import obd_dtc
 from openpilot.system.manager.process_config import managed_processes
 from openpilot.system.athena.registration import register, UNREGISTERED_DONGLE_ID
 from openpilot.common.swaglog import cloudlog, add_file_handler
@@ -196,6 +197,10 @@ def main() -> None:
   manager_init()
   if os.getenv("PREPAREONLY") is not None:
     return
+
+  # Engine fault codes: the panda has a single master and diagnostics need ELM327 safety mode,
+  # so this is the only moment it is free. Bounded and never raises.
+  obd_dtc.scan_at_boot()
 
   # SystemExit on sigterm
   signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(1))
