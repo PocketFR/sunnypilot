@@ -40,7 +40,6 @@ class DiagnosticsLayout(Widget):
       text_item(lambda: tr("Pending Codes"), lambda: self._codes("pending")),
       text_item(lambda: tr("Failed Since Last Clear"), lambda: self._codes("failed_since_clear")),
       text_item(lambda: tr("Other ECUs"), self._other_ecus),
-      text_item(lambda: tr("Odometer"), lambda: ("%d km" % self._status["odometer_km"]) if self._status.get("odometer_km") else tr("N/A")),
       text_item(lambda: tr("Last Read"), self._last_read),
       button_item(lambda: tr("Read Codes"), lambda: tr("READ"), lambda: tr(DESCRIPTIONS['read']),
                   callback=self._read_prompt, enabled=self._can_act),

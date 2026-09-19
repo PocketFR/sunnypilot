@@ -67,7 +67,7 @@ class DiagnosticsLayoutMici(NavScroller):
     self._icon = gui_app.texture("icons_mici/exclamation_point.png", ICON_SIZE, ICON_SIZE)
 
     self._engine = InfoBlock(tr("check engine"), tr("engine codes"))
-    self._others = InfoBlock(tr("other ecus"), tr("odometer"), scroll_b=False)
+    self._others = InfoBlock(tr("other ecus"), tr("last read"), scroll_b=False)
 
     self._read_btn = BigButton(tr("read codes"), "")
     self._read_btn.set_click_callback(self._read_prompt)
@@ -85,9 +85,7 @@ class DiagnosticsLayoutMici(NavScroller):
     self._refresh()
 
   def _refresh(self) -> None:
-    odo = self._status.get("odometer_km")
-    self._others.value_b.set_text(("%d km" % odo) if odo else tr("N/A"))
-    self._read_btn.set_value(self._last_read())
+    self._others.value_b.set_text(self._last_read())
 
     if not self._status.get("ok"):
       self._engine.value_a.set_text(tr("no reading"))
