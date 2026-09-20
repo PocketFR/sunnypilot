@@ -22,8 +22,10 @@ if gui_app.sunnypilot_ui():
 DESCRIPTIONS = {
   'read': tr_noop("Read the engine fault codes. The panda can only have one master, so openpilot restarts and reads "
                   "them at startup, before it takes control of the car."),
-  'clear': tr_noop("Erase every stored fault code. This also resets the emissions readiness monitors, which can fail "
-                   "the OBD part of a roadworthiness test until the car has completed its drive cycles."),
+  'clear': tr_noop("Erase the stored fault codes of the engine, the cruise control radar and the ABS. The last two "
+                   "log a lost communication every time openpilot silences the radar to control the brakes. This also "
+                   "resets the emissions readiness monitors, which can fail the OBD part of a roadworthiness test "
+                   "until the car has completed its drive cycles."),
 }
 
 
@@ -90,9 +92,16 @@ class DiagnosticsLayout(Widget):
   def _can_act(self) -> bool:
     return self._stopped() and not ui_state.engaged
 
+  def _clearable(self) -> list[str]:
+    """Ce que l'effacement vise : le moteur, plus le SCC et l'ABS (voir obd_dtc.CLEAR_ECUS)."""
+    others = self._status.get("other_ecus") or {}
+    engine = sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |
+                    set(self._status.get("pending") or []))
+    return engine + ["%s %s" % (name, code)
+                     for name in obd_dtc.CHASSIS_ECUS.values() for code in others.get(name, [])]
+
   def _can_clear(self) -> bool:
-    return self._can_act() and bool(self._status.get("stored") or self._status.get("confirmed") or
-                                    self._status.get("pending") or self._status.get("mil"))
+    return self._can_act() and bool(self._clearable() or self._status.get("mil"))
 
   def _restart(self, action: str) -> None:
     obd_dtc.request(action)
@@ -107,8 +116,7 @@ class DiagnosticsLayout(Widget):
                                       callback=on_result))
 
   def _clear_prompt(self) -> None:
-    codes = sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |
-                   set(self._status.get("pending") or []))
+    codes = self._clearable()
     text = tr("Erase these codes?") + "\n\n" + (", ".join(codes) if codes else tr("none")) + "\n\n" + \
            tr("openpilot will restart. The emissions readiness monitors will be reset.")
 
