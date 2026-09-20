@@ -35,6 +35,11 @@ import sys
 import threading
 import time
 
+from openpilot.sunnypilot.selfdrive.common.boot_time import (TIME_FORMAT, TIME_SLACK,
+                                                             boot_id as _boot_id,
+                                                             clock_is_set as _clock_is_set,
+                                                             real_time as _real_time)
+
 STATUS_PATH = "/data/dtc_status.json"
 REQUEST_PATH = "/data/dtc_request"
 LOG_PATH = "/data/dtc_log.txt"
@@ -62,11 +67,8 @@ ODO_OFFSET = 6
 SCAN_TIMEOUT = 30.
 HANDOVER_DELAY = 1.0
 LETTERS = "PCBU"
-TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 # "2026-03-24 14:46:14 (t+31s 3f2a1c9d) message"
 LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \(t\+(\d+)s ([0-9a-f]{8})\) (.*)$")
-# au-dela de cet ecart, l'horodatage vient d'une horloge pas encore recalee
-TIME_SLACK = 60.
 # attente de la mise a l'heure : le wifi ou le GPS mettent de quelques secondes a
 # quelques minutes, au-dela on abandonne plutot que de veiller pour rien
 CLOCK_POLL = 20.
@@ -119,29 +121,6 @@ def read_status() -> dict:
       return _with_corrected_time(json.load(f))
   except (OSError, ValueError):
     return {}
-
-
-def _clock_is_set() -> bool:
-  """openpilot sait dire si l'horloge a ete recalee : au boot elle vaut la date de
-  compilation de systemd, celle de l'image AGNOS (common/time_helpers.py)."""
-  try:
-    from openpilot.common.time_helpers import system_time_valid
-    return system_time_valid()
-  except Exception:
-    return False
-
-
-def _real_time(mono: float) -> float:
-  """Heure reelle d'un evenement du demarrage courant, d'apres son temps monotone."""
-  return time.time() - (time.monotonic() - mono)
-
-
-def _boot_id() -> str:
-  try:
-    with open("/proc/sys/kernel/random/boot_id") as f:
-      return f.read().strip()
-  except OSError:
-    return ""
 
 
 def _with_corrected_time(status: dict) -> dict:
