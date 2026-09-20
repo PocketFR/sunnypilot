@@ -273,14 +273,15 @@ class TestSentryFrames:
     written = os.listdir(s.recorder.path)
     assert {n[0] for n in written if n.endswith(".jpg")} == {"f", "e", "d"}
 
-  def test_the_cabin_camera_does_not_trigger(self, tmp_path):
+  def test_the_cabin_camera_triggers_too(self, tmp_path):
+    """Elle regarde par les vitres laterales : c'est elle qui voit venir sur les cotes."""
     s = self._sentry(tmp_path)
     moving = frame()
     moving[20:90, 20:110] = 220
     s.on_frames({"d": (frame(), lambda: b"jpeg")}, 0.)
     s.on_frames({"d": (moving, lambda: b"jpeg")}, 1.)
 
-    assert not s.recorder.recording
+    assert s.recorder.recording and s.recorder.triggers == ["motion"]
 
   def test_a_can_frame_opens_an_event(self, tmp_path):
     s = self._sentry(tmp_path)

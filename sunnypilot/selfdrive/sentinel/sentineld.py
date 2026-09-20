@@ -4,8 +4,8 @@ Mode sentinelle : surveille la voiture garee et n'enregistre que ce qui se passe
 
 Arme depuis le panneau « sentinelle » (parametre SentryMode), le service tourne hors
 route aux cotes de camerad, qui est demarre par la meme porte. Deux declencheurs :
-le mouvement vu par les cameras avant et grand angle, et toute trame CAN entendue par
-le panda. Pendant un evenement, une image par seconde et par camera est ecrite en JPEG,
+le mouvement vu par les trois cameras, celle de l'habitacle comprise puisqu'elle couvre
+les cotes, et toute trame CAN entendue par le panda. Pendant un evenement, une image par seconde et par camera est ecrite en JPEG,
 precedee des dernieres images gardees en memoire, de quoi voir ce qui s'est passe juste
 avant. Le NAS en fait ensuite un timelapse.
 
@@ -35,7 +35,9 @@ MIN_VOLTAGE_PARAM = "SentryMinVoltage"
 
 # Cameras : prefixe de fichier -> nom du flux VisionIPC
 CAMERAS = {"f": "VISION_STREAM_ROAD", "e": "VISION_STREAM_WIDE_ROAD", "d": "VISION_STREAM_DRIVER"}
-MOTION_CAMERAS = ("f", "e")  # la camera cabine ne declenche pas : elle filme l'habitacle
+# Les trois cameras declenchent : celle de l'habitacle regarde par les vitres laterales,
+# donc elle voit venir ce que les deux autres, tournees vers l'avant, manquent.
+MOTION_CAMERAS = tuple(CAMERAS)
 
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
 PRE_ROLL = 10             # images gardees en memoire avant le declencheur
