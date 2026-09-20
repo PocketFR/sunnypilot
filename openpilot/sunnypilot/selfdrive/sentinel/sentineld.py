@@ -392,6 +392,7 @@ class Sentry:
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.
+    self.current_ma = 0.
     self.power_w = 0.
     self.som_w = 0.
     self.last_frame = 0.
@@ -465,20 +466,35 @@ def main() -> None:
   from openpilot.system.hardware import HARDWARE
   from openpilot.system.loggerd.config import get_available_percent
 
-  # L'interface est arretee pendant la veille : c'est a nous d'eteindre l'ecran, sinon il
-  # resterait allume sur la derniere valeur posee avant l'armement.
-  try:
-    HARDWARE.set_screen_brightness(0)
-  except Exception:
-    pass
-
-  def read_power() -> tuple[float, float]:
-    """Puissance tiree de la voiture, et part du seul calculateur : la difference
-    donne le cout des cameras, qui est ce qui pese dans la veille."""
+  def screen_off() -> None:
+    """A reaffirmer, pas a poser une fois : quand l'armement se fait sans redemarrage,
+    l'interface est encore en train de s'arreter et rallume le retroeclairage apres nous."""
     try:
-      return HARDWARE.get_current_power_draw() or 0., HARDWARE.get_som_power_draw() or 0.
+      HARDWARE.set_screen_brightness(0)
     except Exception:
-      return 0., 0.
+      pass
+
+  screen_off()
+
+  def read_power(voltage_mv: float, current_ma: float) -> tuple[float, float]:
+    """Puissance tiree de la voiture, et part du seul calculateur.
+
+    Le capteur que lit openpilot (/sys/class/hwmon/hwmon1/power1_input) n'existe pas sur
+    mici et rend 0 : on calcule donc la puissance cote voiture a partir de la tension et
+    du courant rapportes par le panda, verifies a 2,56 W veille armee contre 2,05 W au
+    repos. La difference avec la part du calculateur donne le cout des cameras.
+    """
+    try:
+      som = HARDWARE.get_som_power_draw() or 0.
+    except Exception:
+      som = 0.
+    try:
+      total = HARDWARE.get_current_power_draw() or 0.
+    except Exception:
+      total = 0.
+    if not total:
+      total = voltage_mv * current_ma / 1e6
+    return total, som
 
   sentry = Sentry()
   # marqueur laisse en place par la veille precedente = elle ne s'est pas arretee d'elle-meme
@@ -499,7 +515,10 @@ def main() -> None:
     sm.update(0)
 
     ignition = any(ps.ignitionLine or ps.ignitionCan for ps in sm["pandaStates"]) if sm.updated["pandaStates"] else False
-    voltage = sm["peripheralState"].voltage if sm.updated["peripheralState"] else sentry.voltage_mv
+    if sm.updated["peripheralState"]:
+      voltage, sentry.current_ma = sm["peripheralState"].voltage, sm["peripheralState"].current
+    else:
+      voltage = sentry.voltage_mv
     if sentry.check_stop(ignition, voltage, now):
       break
 
@@ -526,12 +545,14 @@ def main() -> None:
         recalibrated = bool(recalibrate_events(sentry.root)) or clock_is_set()
 
     if now - last_trace > TRACE_INTERVAL:
-      sentry.power_w, sentry.som_w = read_power()
+      sentry.power_w, sentry.som_w = read_power(sentry.voltage_mv, sentry.current_ma)
       append_trace(sentry.trace_row())
+      screen_off()
       last_trace = now
 
     if now - last_status > 5.:
       write_status(sentry.status())
+      screen_off()
       last_status = now
 
     rk.keep_time()
