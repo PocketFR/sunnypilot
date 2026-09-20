@@ -684,3 +684,17 @@ class TestMotionAgainstFoliage:
     d.update(frame(width=1344, height=760, value=100))
 
     assert d.update(frame(width=1344, height=760, value=160)) is False
+
+
+class TestCarSidePower:
+  """Le capteur de puissance globale n'existe pas sur mici : on passe par le panda."""
+
+  def test_the_row_carries_the_car_side_power(self, tmp_path):
+    s = sentineld.Sentry(str(tmp_path / "ev"))
+    s.voltage_mv, s.current_ma = 12460, 205
+    s.power_w = s.voltage_mv * s.current_ma / 1e6
+
+    assert abs(s.trace_row()["power_w"] - 2.56) < 0.01
+
+  def test_the_current_starts_at_zero(self, tmp_path):
+    assert sentineld.Sentry(str(tmp_path / "ev")).current_ma == 0.
