@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 
 STATUS_PATH = "/data/dtc_status.json"
@@ -41,14 +43,16 @@ DISABLE_PATH = "/data/dtc_disable"
 ENGINE_ECU = 0x7E0
 SCC_ECU = 0x7D0
 ABS_ECU = 0x7D1
+EPS_ECU = 0x7D4
 BUS = 1
 # Calculateurs qui repondent en diagnostic sur cette voiture (scan sur bus 1, OBD actif).
-OTHER_ECUS = {0x7E1: "trans", SCC_ECU: "scc", ABS_ECU: "abs", 0x7D4: "eps",
+OTHER_ECUS = {0x7E1: "trans", SCC_ECU: "scc", ABS_ECU: "abs", EPS_ECU: "eps",
               0x7C6: "cluster", 0x7B7: "corner radar", 0x7B3: "0x7B3"}
-# Les codes en C du SCC et de l'ABS sont provoques par openpilot lui-meme, qui baillonne
-# le SCC : ces deux modules journalisent la perte de communication. L'effacement les vise
+# Les codes en C du SCC, de l'ABS et de la direction assistee sont provoques par openpilot
+# lui-meme, qui baillonne le SCC : ces modules journalisent la perte de communication
+# (C1638, C16B8 pour les deux premiers, C1804 pour la direction). L'effacement les vise
 # donc avec le moteur. Les autres calculateurs sont affiches mais jamais effaces.
-CHASSIS_ECUS = {SCC_ECU: "scc", ABS_ECU: "abs"}
+CHASSIS_ECUS = {SCC_ECU: "scc", ABS_ECU: "abs", EPS_ECU: "eps"}
 CLEAR_ECUS = {ENGINE_ECU: "moteur", **CHASSIS_ECUS}
 # Odometre : combine (0x7C6), DID 0xB002, octets 6-8 en gros-boutiste, en km.
 # Verifie contre le tableau de bord : 131404.
@@ -58,6 +62,15 @@ ODO_OFFSET = 6
 SCAN_TIMEOUT = 30.
 HANDOVER_DELAY = 1.0
 LETTERS = "PCBU"
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+# "2026-03-24 14:46:14 (t+31s 3f2a1c9d) message"
+LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \(t\+(\d+)s ([0-9a-f]{8})\) (.*)$")
+# au-dela de cet ecart, l'horodatage vient d'une horloge pas encore recalee
+TIME_SLACK = 60.
+# attente de la mise a l'heure : le wifi ou le GPS mettent de quelques secondes a
+# quelques minutes, au-dela on abandonne plutot que de veiller pour rien
+CLOCK_POLL = 20.
+CLOCK_WAIT = 30 * 60.
 
 
 def dtc_str(b0: int, b1: int) -> str:
@@ -65,9 +78,12 @@ def dtc_str(b0: int, b1: int) -> str:
 
 
 def _log(msg: str) -> None:
+  """Horodate aussi en secondes depuis le demarrage et par debut d'identifiant de
+  demarrage : au boot l'horloge murale est encore a la date par defaut d'AGNOS, et
+  ces deux repères permettent de recaler la ligne apres coup (voir _fix_log_times)."""
   try:
     with open(LOG_PATH, "a") as f:
-      f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+      f.write("%s (t+%ds %s) %s\n" % (time.strftime(TIME_FORMAT), time.monotonic(), _boot_id()[:8], msg))
   except OSError:
     pass
 
@@ -76,11 +92,120 @@ def _log(msg: str) -> None:
 
 def read_status() -> dict:
   """Dernier releve. N'importe rien de lourd : appele depuis le process UI."""
+  _fix_log_times()
   try:
     with open(STATUS_PATH) as f:
-      return json.load(f)
+      return _with_corrected_time(json.load(f))
   except (OSError, ValueError):
     return {}
+
+
+def _clock_is_set() -> bool:
+  """openpilot sait dire si l'horloge a ete recalee : au boot elle vaut la date de
+  compilation de systemd, celle de l'image AGNOS (common/time_helpers.py)."""
+  try:
+    from openpilot.common.time_helpers import system_time_valid
+    return system_time_valid()
+  except Exception:
+    return False
+
+
+def _real_time(mono: float) -> float:
+  """Heure reelle d'un evenement du demarrage courant, d'apres son temps monotone."""
+  return time.time() - (time.monotonic() - mono)
+
+
+def _boot_id() -> str:
+  try:
+    with open("/proc/sys/kernel/random/boot_id") as f:
+      return f.read().strip()
+  except OSError:
+    return ""
+
+
+def _with_corrected_time(status: dict) -> dict:
+  """Recale l'horodatage du releve.
+
+  Au demarrage, le comma n'a ni GPS ni wifi : son horloge est encore a la date par
+  defaut d'AGNOS, et le releve est donc horodate n'importe quand. Le temps monotone,
+  lui, est juste. Tant qu'on est dans le meme demarrage, on retrouve l'heure reelle
+  du releve des que l'horloge est recalee. On reecrit alors le fichier, pour que les
+  demarrages suivants lisent la bonne heure.
+  """
+  mono, boot = status.get("mono"), status.get("boot_id")
+  if mono is None or not boot or boot != _boot_id() or not _clock_is_set():
+    return status
+
+  corrected = _real_time(mono)
+  if abs(corrected - status.get("time", 0)) > TIME_SLACK:
+    status["time"] = corrected
+    try:
+      with open(STATUS_PATH, "w") as f:
+        json.dump(status, f)
+    except OSError:
+      pass
+  return status
+
+
+def _recalibrate() -> None:
+  """Recale ce qui a ete horodate avant la mise a l'heure : le releve et le journal."""
+  _fix_log_times()
+  try:
+    with open(STATUS_PATH) as f:
+      _with_corrected_time(json.load(f))  # reecrit le fichier s'il y a de quoi corriger
+  except (OSError, ValueError):
+    pass
+
+
+def _fix_log_times() -> None:
+  """Recale les lignes du journal ecrites avant que l'horloge ne soit a l'heure.
+
+  Meme principe que pour le releve, mais ligne par ligne : chaque ligne porte ses
+  secondes depuis le demarrage et le debut de l'identifiant de demarrage. Seules les
+  lignes du demarrage courant sont recalees, les autres ne sont plus rattrapables et
+  restent telles quelles, comme les lignes ecrites avant ce format.
+  """
+  if not _clock_is_set():
+    return
+
+  boot = _boot_id()[:8]
+  try:
+    with open(LOG_PATH) as f:
+      lines = f.readlines()
+  except OSError:
+    return
+
+  fixed, changed = [], False
+  for line in lines:
+    m = LOG_LINE.match(line.rstrip("\n"))
+    if m is None or m.group(3) != boot:
+      fixed.append(line)
+      continue
+
+    stamp, mono, rest = m.group(1), float(m.group(2)), m.group(4)
+    real = _real_time(mono)
+    try:
+      written = time.mktime(time.strptime(stamp, TIME_FORMAT))
+    except ValueError:
+      fixed.append(line)
+      continue
+
+    if abs(real - written) <= TIME_SLACK:
+      fixed.append(line)
+      continue
+
+    fixed.append("%s (t+%ds %s) %s\n" % (time.strftime(TIME_FORMAT, time.localtime(real)), mono, boot, rest))
+    changed = True
+
+  if not changed:
+    return
+  try:
+    tmp = LOG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+      f.writelines(fixed)
+    os.replace(tmp, LOG_PATH)
+  except OSError:
+    pass
 
 
 def request(action: str) -> None:
@@ -94,9 +219,42 @@ def request(action: str) -> None:
 
 # ---------------------------------------------------------------- cote demarrage
 
+def fix_log_when_clock_is_set(poll: float = CLOCK_POLL, wait: float = CLOCK_WAIT) -> threading.Thread | None:
+  """Reprend le journal des que l'horloge est recalee, sans rien demander a personne.
+
+  Au demarrage l'horloge vaut la date de l'image AGNOS, et la mise a l'heure arrive
+  plus tard, par le wifi ou par le GPS. On surveille donc en tache de fond, dans le
+  manager, plutot que d'attendre l'ouverture du panneau. Une simple scrutation suffit :
+  la verification ne coute qu'un stat, et rien ne presse a la seconde pres.
+  """
+  if _clock_is_set():
+    _recalibrate()
+    return None
+
+  def wait_then_fix() -> None:
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+      time.sleep(poll)
+      if _clock_is_set():
+        try:
+          _recalibrate()
+        except Exception:
+          pass
+        return
+
+  thread = threading.Thread(target=wait_then_fix, name="dtc_log_time", daemon=True)
+  thread.start()
+  return thread
+
+
 def scan_at_boot(timeout: float = SCAN_TIMEOUT) -> None:
   """Lance la lecture dans un sous-processus. Ne leve jamais, ne bloque jamais
   plus de `timeout` : le demarrage d'openpilot ne doit pas dependre de ca."""
+  # Les lignes du scan sont datees par une horloge encore fausse : on les recalera des
+  # que possible, ici ou au prochain demarrage du manager (un bouton du panneau relance
+  # openpilot sans redemarrer le systeme, l'horloge est alors deja a l'heure).
+  fix_log_when_clock_is_set()
+
   if os.path.exists(DISABLE_PATH):
     return
   try:
@@ -165,7 +323,7 @@ def _read_others(p, ecus: dict) -> dict:
 
 
 def _clear(p) -> dict:
-  """Efface les codes du moteur, du SCC et de l'ABS. Retourne {nom: True ou erreur}."""
+  """Efface les codes du moteur et des calculateurs chassis. Retourne {nom: True ou erreur}."""
   from opendbc.car.uds import DTC_GROUP_TYPE, UdsClient
 
   done: dict[str, object] = {}
@@ -185,7 +343,9 @@ def _run(do_clear: bool) -> dict:
   from opendbc.car.uds import UdsClient
   from panda import Panda
 
-  status: dict = {"time": time.time(), "ok": False, "cleared": None, "error": None, "scc_restored": None}
+  # mono et boot_id : l'horloge n'est pas encore a l'heure ici, voir _with_corrected_time
+  status: dict = {"time": time.time(), "mono": time.monotonic(), "boot_id": _boot_id(),
+                  "ok": False, "cleared": None, "error": None, "scc_restored": None}
   p = None
   try:
     p = Panda()
@@ -200,8 +360,14 @@ def _run(do_clear: bool) -> dict:
       status["scc_restored"] = "%s: %s" % (type(e).__name__, e)
 
     uds = UdsClient(p, ENGINE_ECU, bus=BUS, timeout=0.5, tx_timeout=0.5)
-    uds.tester_present()
-    status.update(_read(uds))
+    try:
+      uds.tester_present()
+      status.update(_read(uds))
+    except Exception:
+      # Le comma se reveille aussi sur une simple activite du bus, a l'approche des cles :
+      # le contact est coupe, les calculateurs dorment. Ce n'est pas une panne de lecture.
+      status["engine_off"] = True
+      raise
     status["ok"] = True
 
     if do_clear:
@@ -244,6 +410,30 @@ def _run(do_clear: bool) -> dict:
   return status
 
 
+def _keep_previous_if_engine_off(status: dict) -> dict:
+  """Une lecture contact coupe n'apprend rien : elle ne doit pas effacer la precedente.
+
+  Le comma se reveille sur activite du bus, cles approchees, moteur eteint : les
+  calculateurs ne repondent pas. On conserve alors le dernier vrai releve, en notant
+  la tentative pour que le panneau puisse le dire.
+  """
+  if status.get("ok") or not status.get("engine_off"):
+    return status
+
+  try:
+    with open(STATUS_PATH) as f:
+      previous = json.load(f)
+  except (OSError, ValueError):
+    return status
+
+  if not previous.get("ok"):
+    return status
+
+  previous["attempt"] = {"time": status["time"], "mono": status["mono"],
+                         "boot_id": status["boot_id"], "engine_off": True}
+  return previous
+
+
 def main() -> int:
   action = ""
   try:
@@ -257,14 +447,17 @@ def main() -> int:
     except OSError:
       pass
 
-  status = _run(do_clear=(action == "clear"))
+  status = _keep_previous_if_engine_off(_run(do_clear=(action == "clear")))
   try:
     with open(STATUS_PATH, "w") as f:
       json.dump(status, f)
   except OSError:
     pass
 
-  if status["ok"]:
+  if status.get("attempt", {}).get("engine_off"):
+    _log("moteur eteint, rien a lire : on garde le releve du %s"
+         % time.strftime(TIME_FORMAT, time.localtime(status.get("time", 0))))
+  elif status["ok"]:
     _log("%s km | voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s "
          "scc_reactive=%s autres=%s" % (
            status.get("odometer_km", "?"), "ALLUME" if status["mil"] else "eteint",

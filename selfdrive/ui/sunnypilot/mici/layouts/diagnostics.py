@@ -104,14 +104,18 @@ class DiagnosticsLayoutMici(NavScroller):
     stamp = self._status.get("time")
     if not stamp:
       return tr("never")
-    return time.strftime("%d/%m/%Y %H:%M", time.localtime(stamp))
+    text = time.strftime("%d/%m/%Y %H:%M", time.localtime(stamp))
+    if (self._status.get("attempt") or {}).get("engine_off"):
+      # releve conserve : la derniere tentative a eu lieu contact coupe
+      text += " · " + tr("engine off")
+    return text
 
   def _codes(self) -> list[str]:
     return sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |
                   set(self._status.get("pending") or []))
 
   def _clearable(self) -> list[str]:
-    """Ce que l'effacement vise : le moteur, plus le SCC et l'ABS (voir obd_dtc.CLEAR_ECUS)."""
+    """Ce que l'effacement vise : le moteur, plus les calculateurs chassis (obd_dtc.CLEAR_ECUS)."""
     others = self._status.get("other_ecus") or {}
     return self._codes() + ["%s %s" % (name, code)
                             for name in obd_dtc.CHASSIS_ECUS.values() for code in others.get(name, [])]
