@@ -200,7 +200,7 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     """Used to disable longitudinal ECUs as needed"""
 
   @staticmethod
-  def deinit(CP: structs.CarParams, can_recv: CanRecvCallable, can_send: CanSendCallable):
+  def deinit(CP: structs.CarParams, CP_SP: structs.CarParamsSP, can_recv: CanRecvCallable, can_send: CanSendCallable):
     """Used to re-enable longitudinal ECUs as needed"""
 
   @staticmethod

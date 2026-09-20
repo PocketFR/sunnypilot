@@ -73,7 +73,7 @@ class DiagnosticsLayoutMici(NavScroller):
     self._read_btn.set_click_callback(self._read_prompt)
     self._read_btn.set_enabled(self._can_act)
 
-    self._clear_btn = BigButton(tr("clear engine codes"), "")
+    self._clear_btn = BigButton(tr("clear codes"), "")
     self._clear_btn.set_click_callback(self._clear_prompt)
     self._clear_btn.set_enabled(self._can_clear)
 
@@ -110,6 +110,12 @@ class DiagnosticsLayoutMici(NavScroller):
     return sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |
                   set(self._status.get("pending") or []))
 
+  def _clearable(self) -> list[str]:
+    """Ce que l'effacement vise : le moteur, plus le SCC et l'ABS (voir obd_dtc.CLEAR_ECUS)."""
+    others = self._status.get("other_ecus") or {}
+    return self._codes() + ["%s %s" % (name, code)
+                            for name in obd_dtc.CHASSIS_ECUS.values() for code in others.get(name, [])]
+
   # ------------------------------------------------------------------- actions
 
   def _stopped(self) -> bool:
@@ -122,7 +128,7 @@ class DiagnosticsLayoutMici(NavScroller):
     return self._stopped() and not ui_state.engaged
 
   def _can_clear(self) -> bool:
-    return self._can_act() and bool(self._codes() or self._status.get("mil"))
+    return self._can_act() and bool(self._clearable() or self._status.get("mil"))
 
   def _restart(self, action: str) -> None:
     obd_dtc.request(action)
@@ -133,6 +139,6 @@ class DiagnosticsLayoutMici(NavScroller):
                                               confirm_callback=lambda: self._restart("read")))
 
   def _clear_prompt(self) -> None:
-    codes = ", ".join(self._codes()) or tr("none")
+    codes = ", ".join(self._clearable()) or tr("none")
     gui_app.push_widget(BigConfirmationDialog(tr("slide to erase") + " " + codes, self._icon, red=True,
                                               confirm_callback=lambda: self._restart("clear")))
