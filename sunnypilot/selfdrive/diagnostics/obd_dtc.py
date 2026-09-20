@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 STATUS_PATH = "/data/dtc_status.json"
@@ -66,6 +67,10 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \(t\+(\d+)s ([0-9a-f]{8})\) (.*)$")
 # au-dela de cet ecart, l'horodatage vient d'une horloge pas encore recalee
 TIME_SLACK = 60.
+# attente de la mise a l'heure : le wifi ou le GPS mettent de quelques secondes a
+# quelques minutes, au-dela on abandonne plutot que de veiller pour rien
+CLOCK_POLL = 20.
+CLOCK_WAIT = 30 * 60.
 
 
 def dtc_str(b0: int, b1: int) -> str:
@@ -142,6 +147,16 @@ def _with_corrected_time(status: dict) -> dict:
   return status
 
 
+def _recalibrate() -> None:
+  """Recale ce qui a ete horodate avant la mise a l'heure : le releve et le journal."""
+  _fix_log_times()
+  try:
+    with open(STATUS_PATH) as f:
+      _with_corrected_time(json.load(f))  # reecrit le fichier s'il y a de quoi corriger
+  except (OSError, ValueError):
+    pass
+
+
 def _fix_log_times() -> None:
   """Recale les lignes du journal ecrites avant que l'horloge ne soit a l'heure.
 
@@ -204,12 +219,41 @@ def request(action: str) -> None:
 
 # ---------------------------------------------------------------- cote demarrage
 
+def fix_log_when_clock_is_set(poll: float = CLOCK_POLL, wait: float = CLOCK_WAIT) -> threading.Thread | None:
+  """Reprend le journal des que l'horloge est recalee, sans rien demander a personne.
+
+  Au demarrage l'horloge vaut la date de l'image AGNOS, et la mise a l'heure arrive
+  plus tard, par le wifi ou par le GPS. On surveille donc en tache de fond, dans le
+  manager, plutot que d'attendre l'ouverture du panneau. Une simple scrutation suffit :
+  la verification ne coute qu'un stat, et rien ne presse a la seconde pres.
+  """
+  if _clock_is_set():
+    _recalibrate()
+    return None
+
+  def wait_then_fix() -> None:
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+      time.sleep(poll)
+      if _clock_is_set():
+        try:
+          _recalibrate()
+        except Exception:
+          pass
+        return
+
+  thread = threading.Thread(target=wait_then_fix, name="dtc_log_time", daemon=True)
+  thread.start()
+  return thread
+
+
 def scan_at_boot(timeout: float = SCAN_TIMEOUT) -> None:
   """Lance la lecture dans un sous-processus. Ne leve jamais, ne bloque jamais
   plus de `timeout` : le demarrage d'openpilot ne doit pas dependre de ca."""
-  # Un bouton du panneau relance openpilot sans redemarrer le systeme : l'horloge est
-  # alors a l'heure et on peut recaler les lignes du scan precedent.
-  _fix_log_times()
+  # Les lignes du scan sont datees par une horloge encore fausse : on les recalera des
+  # que possible, ici ou au prochain demarrage du manager (un bouton du panneau relance
+  # openpilot sans redemarrer le systeme, l'horloge est alors deja a l'heure).
+  fix_log_when_clock_is_set()
 
   if os.path.exists(DISABLE_PATH):
     return
@@ -316,8 +360,14 @@ def _run(do_clear: bool) -> dict:
       status["scc_restored"] = "%s: %s" % (type(e).__name__, e)
 
     uds = UdsClient(p, ENGINE_ECU, bus=BUS, timeout=0.5, tx_timeout=0.5)
-    uds.tester_present()
-    status.update(_read(uds))
+    try:
+      uds.tester_present()
+      status.update(_read(uds))
+    except Exception:
+      # Le comma se reveille aussi sur une simple activite du bus, a l'approche des cles :
+      # le contact est coupe, les calculateurs dorment. Ce n'est pas une panne de lecture.
+      status["engine_off"] = True
+      raise
     status["ok"] = True
 
     if do_clear:
@@ -360,6 +410,30 @@ def _run(do_clear: bool) -> dict:
   return status
 
 
+def _keep_previous_if_engine_off(status: dict) -> dict:
+  """Une lecture contact coupe n'apprend rien : elle ne doit pas effacer la precedente.
+
+  Le comma se reveille sur activite du bus, cles approchees, moteur eteint : les
+  calculateurs ne repondent pas. On conserve alors le dernier vrai releve, en notant
+  la tentative pour que le panneau puisse le dire.
+  """
+  if status.get("ok") or not status.get("engine_off"):
+    return status
+
+  try:
+    with open(STATUS_PATH) as f:
+      previous = json.load(f)
+  except (OSError, ValueError):
+    return status
+
+  if not previous.get("ok"):
+    return status
+
+  previous["attempt"] = {"time": status["time"], "mono": status["mono"],
+                         "boot_id": status["boot_id"], "engine_off": True}
+  return previous
+
+
 def main() -> int:
   action = ""
   try:
@@ -373,14 +447,17 @@ def main() -> int:
     except OSError:
       pass
 
-  status = _run(do_clear=(action == "clear"))
+  status = _keep_previous_if_engine_off(_run(do_clear=(action == "clear")))
   try:
     with open(STATUS_PATH, "w") as f:
       json.dump(status, f)
   except OSError:
     pass
 
-  if status["ok"]:
+  if status.get("attempt", {}).get("engine_off"):
+    _log("moteur eteint, rien a lire : on garde le releve du %s"
+         % time.strftime(TIME_FORMAT, time.localtime(status.get("time", 0))))
+  elif status["ok"]:
     _log("%s km | voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s "
          "scc_reactive=%s autres=%s" % (
            status.get("odometer_km", "?"), "ALLUME" if status["mil"] else "eteint",

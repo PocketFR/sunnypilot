@@ -79,6 +79,9 @@ class DiagnosticsLayout(Widget):
     stamp = time.strftime("%d/%m/%Y %H:%M", time.localtime(self._status.get("time", 0)))
     if not self._status.get("ok"):
       return "%s (%s)" % (stamp, self._status.get("error") or tr("failed"))
+    if (self._status.get("attempt") or {}).get("engine_off"):
+      # releve conserve : la derniere tentative a eu lieu contact coupe
+      return "%s (%s)" % (stamp, tr("last attempt: engine off"))
     return stamp
 
   # ------------------------------------------------------------------- actions
