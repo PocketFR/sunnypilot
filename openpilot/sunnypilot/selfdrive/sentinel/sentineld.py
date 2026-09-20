@@ -337,6 +337,15 @@ class Sentry:
       self.stop_reason = "disarmed"
     return self.stop_reason
 
+  def on_boot(self, now: float, power_cut: bool) -> None:
+    """Un demarrage alors que la sentinelle veillait merite d'etre filme.
+
+    Debrancher le comma est la premiere chose a faire pour le faire taire : au
+    rebranchement il repart en veille, et enregistre aussitot celui qui est devant.
+    power_cut distingue la coupure franche du redemarrage voulu a l'armement.
+    """
+    self.recorder.trigger("boot", now, {"power_cut": power_cut})
+
   def on_can(self, now: float, buses: set[int]) -> None:
     """Hors contact, une trame sur le bus est deja un evenement : reveil du reseau,
     ouverture, alarme. Le detail des identifiants viendra plus tard si besoin."""
@@ -381,6 +390,11 @@ def main() -> None:
     pass
 
   sentry = Sentry()
+  # marqueur laisse en place par la veille precedente = elle ne s'est pas arretee d'elle-meme
+  power_cut = state.was_running()
+  state.mark_running()
+  sentry.on_boot(time.monotonic(), power_cut)
+
   sm = messaging.SubMaster(["can", "pandaStates", "peripheralState"])
   clients = {cam: VisionIpcClient("camerad", getattr(VisionStreamType, stream), True)
              for cam, stream in CAMERAS.items()}
@@ -427,6 +441,7 @@ def main() -> None:
     rk.keep_time()
 
   sentry.recorder.close()
+  state.clear_running()   # arret volontaire : le prochain demarrage ne criera pas a la coupure
   if sentry.stop_reason in ("ignition", "voltage"):
     state.disarm()
   write_status(sentry.status())
