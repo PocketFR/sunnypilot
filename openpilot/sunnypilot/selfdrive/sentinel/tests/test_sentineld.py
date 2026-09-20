@@ -310,7 +310,7 @@ class TestStatus:
 class FakeBuf:
   """Tampon VisionIPC minimal : NV12, avec un stride plus large que l'image."""
 
-  def __init__(self, width=8, height=4, stride=16, y_value=90):
+  def __init__(self, width=8, height=4, stride=16, y_value=90, as_memoryview=True):
     self.width, self.height, self.stride = width, height, stride
     self.uv_offset = stride * height
     uv_height = ((height // 2) + 15) // 16 * 16
@@ -318,10 +318,23 @@ class FakeBuf:
     y = data[:self.uv_offset].reshape((-1, stride))
     y[:height, :width] = y_value
     y[:height, width:] = 7  # bourrage de ligne : ne doit jamais ressortir
-    self.data = data
+    # memoryview comme sur l'appareil : certaines versions de msgq rendent un tableau
+    # numpy, et confondre les deux a deja fait tomber sentineld (buf.data.size)
+    self.data = memoryview(data.tobytes()) if as_memoryview else data
 
 
 class TestFrameExtraction:
+  @pytest.mark.parametrize("as_memoryview", [True, False])
+  def test_both_buffer_flavours_extract_the_same(self, as_memoryview):
+    y = sentineld.extract_y(FakeBuf(y_value=77, as_memoryview=as_memoryview))
+
+    assert y.shape == (4, 8) and (y == 77).all()
+
+  @pytest.mark.parametrize("as_memoryview", [True, False])
+  def test_the_emptiness_check_works_on_both(self, as_memoryview):
+    """Le garde de la boucle principale : len() marche sur les deux, .size non."""
+    assert len(FakeBuf(as_memoryview=as_memoryview).data) > 0
+
   def test_the_luminance_plane_ignores_the_stride_padding(self):
     y = sentineld.extract_y(FakeBuf(y_value=90))
 

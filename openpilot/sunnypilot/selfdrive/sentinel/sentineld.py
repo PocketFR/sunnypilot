@@ -399,7 +399,7 @@ def main() -> None:
         if not client.is_connected() and not client.connect(False):
           continue
         buf = client.recv(20)
-        if buf is None or not buf.data.size:
+        if buf is None or len(buf.data) == 0:   # buf.data est un memoryview sur l'appareil
           continue
         frames[cam] = (extract_y(buf), lambda b=buf: encode_jpeg(nv12_to_rgb(b)))
       if frames:
