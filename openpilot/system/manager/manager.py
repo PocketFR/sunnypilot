@@ -163,6 +163,12 @@ def manager_thread() -> None:
       sentinel_state.disarm()
       cloudlog.info("sentry mode disarmed by ignition")
 
+    # Et l'inverse, si l'armement automatique est actif : couper le moteur met la
+    # sentinelle en veille, sans redemarrage, les portes des processus suivent.
+    if sentinel_state.should_auto_arm(ignition, ignition_prev):
+      sentinel_state.arm()
+      cloudlog.info("sentry mode armed automatically at ignition off")
+
     # update offroad state for services that don't subscribe to deviceState
     if started != started_prev:
       params.put_bool("IsOffroad", not started, block=True)
