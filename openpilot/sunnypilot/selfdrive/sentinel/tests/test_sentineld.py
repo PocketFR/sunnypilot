@@ -698,3 +698,51 @@ class TestCarSidePower:
 
   def test_the_current_starts_at_zero(self, tmp_path):
     assert sentineld.Sentry(str(tmp_path / "ev")).current_ma == 0.
+
+
+class TestFinish:
+  """Fermeture propre : ce qui distingue un arret ordonne d'une coupure de courant."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "ARMED_PATH", str(tmp_path / "armed"))
+    monkeypatch.setattr(state, "RUNNING_PATH", str(tmp_path / "running"))
+    monkeypatch.setattr(state, "STATUS_PATH", str(tmp_path / "status.json"))
+    monkeypatch.setattr(state, "MIN_VOLTAGE_PATH", str(tmp_path / "min_voltage"))
+    state.arm()
+    state.mark_running()
+    self.sentry = sentineld.Sentry(str(tmp_path / "events"))
+
+  def test_an_ordered_stop_stays_armed_and_leaves_no_marker(self):
+    """Redemarrage demande : la veille doit reprendre apres, sans crier a la coupure."""
+    self.sentry.stop_reason = "stopped"
+
+    assert sentineld.finish(self.sentry) is False
+    assert state.is_armed() is True and state.was_running() is False
+
+  def test_the_engine_starting_disarms(self):
+    self.sentry.stop_reason = "ignition"
+    sentineld.finish(self.sentry)
+
+    assert state.is_armed() is False and state.was_running() is False
+
+  def test_a_flat_battery_disarms_and_asks_for_shutdown(self):
+    self.sentry.stop_reason = "voltage"
+
+    assert sentineld.finish(self.sentry) is True
+    assert state.is_armed() is False
+
+  def test_the_open_event_is_closed(self):
+    self.sentry.recorder.trigger("motion", 0., {"motion_cameras": ["f"]})
+    path = self.sentry.recorder.path
+    self.sentry.stop_reason = "stopped"
+    sentineld.finish(self.sentry)
+
+    assert not self.sentry.recorder.recording
+    assert "closed" in json.loads(open(os.path.join(path, "meta.json")).read())
+
+  def test_the_status_is_published_on_the_way_out(self):
+    self.sentry.stop_reason = "ignition"
+    sentineld.finish(self.sentry)
+
+    assert state.read_status()["stop_reason"] == "ignition"
