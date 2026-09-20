@@ -71,6 +71,10 @@ TIME_SLACK = 60.
 # quelques minutes, au-dela on abandonne plutot que de veiller pour rien
 CLOCK_POLL = 20.
 CLOCK_WAIT = 30 * 60.
+# Le journal vit sur /data et grossit de deux ou trois lignes par mise du contact.
+# Une ligne fait ~200 octets, donc ce plafond garde environ un an d'historique.
+LOG_MAX_BYTES = 128 * 1024
+LOG_KEEP_LINES = 400
 
 
 def dtc_str(b0: int, b1: int) -> str:
@@ -84,6 +88,23 @@ def _log(msg: str) -> None:
   try:
     with open(LOG_PATH, "a") as f:
       f.write("%s (t+%ds %s) %s\n" % (time.strftime(TIME_FORMAT), time.monotonic(), _boot_id()[:8], msg))
+  except OSError:
+    pass
+  _trim_log()
+
+
+def _trim_log() -> None:
+  """Garde le journal borne : il n'a pas a grossir indefiniment sur /data. Au-dela du
+  plafond, on ne conserve que les LOG_KEEP_LINES dernieres lignes, les plus recentes."""
+  try:
+    if os.path.getsize(LOG_PATH) <= LOG_MAX_BYTES:
+      return
+    with open(LOG_PATH) as f:
+      lines = f.readlines()
+    tmp = LOG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+      f.writelines(lines[-LOG_KEEP_LINES:])
+    os.replace(tmp, LOG_PATH)
   except OSError:
     pass
 
