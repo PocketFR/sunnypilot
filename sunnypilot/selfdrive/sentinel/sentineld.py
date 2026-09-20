@@ -370,7 +370,15 @@ def main() -> None:
 
   from openpilot.common.params import Params
   from openpilot.common.realtime import Ratekeeper
+  from openpilot.system.hardware import HARDWARE
   from openpilot.system.loggerd.config import get_available_percent
+
+  # L'interface est arretee pendant la veille : c'est a nous d'eteindre l'ecran, sinon il
+  # resterait allume sur la derniere valeur posee avant l'armement.
+  try:
+    HARDWARE.set_screen_brightness(0)
+  except Exception:
+    pass
 
   sentry = Sentry()
   sm = messaging.SubMaster(["can", "pandaStates", "peripheralState"])
