@@ -340,21 +340,26 @@ class TestFrameExtraction:
 
     assert y.shape == (4, 8) and (y == 90).all()
 
-  def test_a_grey_frame_converts_to_grey(self):
-    rgb = sentineld.nv12_to_rgb(FakeBuf(y_value=90))
+  def test_a_grey_frame_stays_grey(self):
+    ycbcr = sentineld.nv12_to_ycbcr(FakeBuf(y_value=90))
 
-    assert rgb.shape == (4, 8, 3)
-    assert abs(int(rgb[0, 0, 0]) - 90) <= 1 and abs(int(rgb[0, 0, 2]) - 90) <= 1
+    assert ycbcr.shape == (4, 8, 3)
+    assert (ycbcr[:, :, 0] == 90).all()          # luminance conservee
+    assert (ycbcr[:, :, 1:] == 128).all()        # chrominance neutre : du gris
 
-  def test_the_jpeg_round_trips(self):
+  def test_the_jpeg_round_trips_to_the_right_brightness(self):
     from io import BytesIO
 
     from PIL import Image
 
-    jpeg = sentineld.encode_jpeg(sentineld.nv12_to_rgb(FakeBuf(width=64, height=32, stride=80, y_value=200)))
+    jpeg = sentineld.encode_jpeg(FakeBuf(width=64, height=32, stride=80, y_value=200))
+    img = Image.open(BytesIO(jpeg))
 
-    assert jpeg[:2] == b"\xff\xd8"  # entete JPEG
-    assert Image.open(BytesIO(jpeg)).size == (64, 32)
+    assert jpeg[:2] == b"\xff\xd8"              # entete JPEG
+    assert img.size == (64, 32)
+    # relu en RGB, un gris de luminance 200 doit ressortir gris et clair
+    r, g, b = img.convert("RGB").getpixel((32, 16))
+    assert abs(r - 200) < 12 and abs(g - 200) < 12 and abs(b - 200) < 12
 
 
 
