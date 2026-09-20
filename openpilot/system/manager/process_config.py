@@ -12,12 +12,22 @@ from openpilot.common.hardware.hw import Paths
 from openpilot.sunnypilot.mapd.mapd_manager import MAPD_PATH
 
 from openpilot.sunnypilot.models.helpers import get_active_model_runner
+from openpilot.sunnypilot.selfdrive.sentinel import state as sentinel_state
 from openpilot.sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
+
+def not_sentinel(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return not sentinel(started, params, CP)
+
+def sentinel(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # mode sentinelle : arme depuis l'ecran, et seulement voiture a l'arret. L'etat tient
+  # dans un fichier et non dans un parametre : l'appareil tourne une version precompilee,
+  # ou une cle ajoutee a params_keys.h est inconnue (voir sentinel/state.py).
+  return sentinel_state.is_armed() and not started
 
 def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.notCar
@@ -114,7 +124,8 @@ procs = [
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(livestream, notcar)),
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
 
-  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream), enabled=not WEBCAM),
+  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream, sentinel), enabled=not WEBCAM),
+  PythonProcess("sentineld", "openpilot.sunnypilot.selfdrive.sentinel.sentineld", sentinel),
   PythonProcess("webcamerad", "openpilot.system.camerad.webcam.camerad", driverview, enabled=WEBCAM),
   PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
   PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() != "Darwin"),
