@@ -42,14 +42,16 @@ DISABLE_PATH = "/data/dtc_disable"
 ENGINE_ECU = 0x7E0
 SCC_ECU = 0x7D0
 ABS_ECU = 0x7D1
+EPS_ECU = 0x7D4
 BUS = 1
 # Calculateurs qui repondent en diagnostic sur cette voiture (scan sur bus 1, OBD actif).
-OTHER_ECUS = {0x7E1: "trans", SCC_ECU: "scc", ABS_ECU: "abs", 0x7D4: "eps",
+OTHER_ECUS = {0x7E1: "trans", SCC_ECU: "scc", ABS_ECU: "abs", EPS_ECU: "eps",
               0x7C6: "cluster", 0x7B7: "corner radar", 0x7B3: "0x7B3"}
-# Les codes en C du SCC et de l'ABS sont provoques par openpilot lui-meme, qui baillonne
-# le SCC : ces deux modules journalisent la perte de communication. L'effacement les vise
+# Les codes en C du SCC, de l'ABS et de la direction assistee sont provoques par openpilot
+# lui-meme, qui baillonne le SCC : ces modules journalisent la perte de communication
+# (C1638, C16B8 pour les deux premiers, C1804 pour la direction). L'effacement les vise
 # donc avec le moteur. Les autres calculateurs sont affiches mais jamais effaces.
-CHASSIS_ECUS = {SCC_ECU: "scc", ABS_ECU: "abs"}
+CHASSIS_ECUS = {SCC_ECU: "scc", ABS_ECU: "abs", EPS_ECU: "eps"}
 CLEAR_ECUS = {ENGINE_ECU: "moteur", **CHASSIS_ECUS}
 # Odometre : combine (0x7C6), DID 0xB002, octets 6-8 en gros-boutiste, en km.
 # Verifie contre le tableau de bord : 131404.
@@ -277,7 +279,7 @@ def _read_others(p, ecus: dict) -> dict:
 
 
 def _clear(p) -> dict:
-  """Efface les codes du moteur, du SCC et de l'ABS. Retourne {nom: True ou erreur}."""
+  """Efface les codes du moteur et des calculateurs chassis. Retourne {nom: True ou erreur}."""
   from opendbc.car.uds import DTC_GROUP_TYPE, UdsClient
 
   done: dict[str, object] = {}

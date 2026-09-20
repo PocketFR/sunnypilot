@@ -111,7 +111,7 @@ class DiagnosticsLayoutMici(NavScroller):
                   set(self._status.get("pending") or []))
 
   def _clearable(self) -> list[str]:
-    """Ce que l'effacement vise : le moteur, plus le SCC et l'ABS (voir obd_dtc.CLEAR_ECUS)."""
+    """Ce que l'effacement vise : le moteur, plus les calculateurs chassis (obd_dtc.CLEAR_ECUS)."""
     others = self._status.get("other_ecus") or {}
     return self._codes() + ["%s %s" % (name, code)
                             for name in obd_dtc.CHASSIS_ECUS.values() for code in others.get(name, [])]

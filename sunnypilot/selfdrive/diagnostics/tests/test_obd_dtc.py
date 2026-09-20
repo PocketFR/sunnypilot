@@ -10,7 +10,7 @@ from opendbc.car.uds import SERVICE_TYPE
 
 from openpilot.sunnypilot.selfdrive.diagnostics import obd_dtc
 
-SCC, ABS, ENGINE = obd_dtc.SCC_ECU, obd_dtc.ABS_ECU, obd_dtc.ENGINE_ECU
+SCC, ABS, EPS, ENGINE = obd_dtc.SCC_ECU, obd_dtc.ABS_ECU, obd_dtc.EPS_ECU, obd_dtc.ENGINE_ECU
 
 
 class FakePanda:
@@ -78,11 +78,11 @@ class TestRestoreScc:
 
 
 class TestClear:
-  def test_clears_engine_scc_and_abs(self):
-    p = FakePanda([ENGINE, SCC, ABS])
-    assert obd_dtc._clear(p) == {"moteur": True, "scc": True, "abs": True}
+  def test_clears_engine_scc_abs_and_eps(self):
+    p = FakePanda([ENGINE, SCC, ABS, EPS])
+    assert obd_dtc._clear(p) == {"moteur": True, "scc": True, "abs": True, "eps": True}
 
-    for addr in (ENGINE, SCC, ABS):
+    for addr in (ENGINE, SCC, ABS, EPS):
       assert b"\x04\x14\xff\xff\xff" in [dat[:5] for dat in p.requests_to(addr)]
 
   def test_a_silent_ecu_is_reported_not_raised(self):
@@ -90,10 +90,10 @@ class TestClear:
     results = obd_dtc._clear(p)
 
     assert results["moteur"] is True
-    assert results["scc"] is not True and results["abs"] is not True
+    assert all(results[name] is not True for name in obd_dtc.CHASSIS_ECUS.values())
 
   def test_leaves_the_other_ecus_alone(self):
-    p = FakePanda([ENGINE, SCC, ABS])
+    p = FakePanda([ENGINE, SCC, ABS, EPS])
     obd_dtc._clear(p)
 
     spared = set(obd_dtc.OTHER_ECUS) - set(obd_dtc.CLEAR_ECUS)
@@ -141,10 +141,10 @@ class TestRun:
 
     assert not any(dat[:2] == b"\x04\x14" for _, dat, _ in fake_panda.sent)
 
-  def test_clear_run_erases_the_three_ecus_and_records_what_was_erased(self, fake_panda):
+  def test_clear_run_erases_every_target_and_records_what_was_erased(self, fake_panda):
     status = obd_dtc._run(do_clear=True)
 
-    assert status["clear_results"] == {"moteur": True, "scc": True, "abs": True}
+    assert status["clear_results"] == {"moteur": True, "scc": True, "abs": True, "eps": True}
     assert status["cleared_chassis"] == {"scc": ["C1638"]}
 
   def test_hands_the_panda_back(self, fake_panda):
