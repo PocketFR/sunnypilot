@@ -138,7 +138,9 @@ class EventRecorder:
     self.index = 0
     self.last_trigger = 0.
     self.triggers: list[str] = []
+    self.details: dict = {}
     self.frames = 0
+    self.started_at = self.started_mono = 0.
 
   @property
   def recording(self) -> bool:
@@ -160,8 +162,27 @@ class EventRecorder:
     self.last_trigger = now
     if kind not in self.triggers:
       self.triggers.append(kind)
+    self._merge(meta or {})
     if not self.recording:
-      self._open(now, meta or {})
+      self._open(now)
+    else:
+      self._write_meta(self._meta())   # une camera peut s'ajouter en cours d'evenement
+
+  def _merge(self, meta: dict) -> None:
+    """Le detail s'accumule : une deuxieme camera qui voit bouger s'ajoute a la premiere,
+    sans doublon, plutot que de remplacer ce qui etait deja note."""
+    for key, value in meta.items():
+      if isinstance(value, list):
+        known = self.details.setdefault(key, [])
+        known.extend(v for v in value if v not in known)
+      else:
+        self.details[key] = value
+
+  def _meta(self) -> dict:
+    meta = dict(self.details)
+    meta.update({"time": self.started_at, "mono": self.started_mono, "boot_id": boot_id(),
+                 "triggers": self.triggers, "frames": self.frames})
+    return meta
 
   def tick(self, now: float) -> None:
     """Avance d'une image, et ferme l'evenement passe le delai sans declencheur."""
@@ -171,14 +192,13 @@ class EventRecorder:
     if now - self.last_trigger > self.post_event_s:
       self.close()
 
-  def _open(self, now: float, meta: dict) -> None:
+  def _open(self, now: float) -> None:
     os.makedirs(self.root, exist_ok=True)
     self.path = os.path.join(self.root, time.strftime("%Y%m%d_%H%M%S", time.localtime()))
     os.makedirs(self.path, exist_ok=True)
     self.index, self.frames = 0, 0
-    meta = dict(meta)
-    meta.update({"time": time.time(), "mono": time.monotonic(), "boot_id": boot_id(), "triggers": self.triggers})
-    self._write_meta(meta)
+    self.started_at, self.started_mono = time.time(), time.monotonic()
+    self._write_meta(self._meta())
 
     # la pre-memoire part en indices negatifs : ce qui precede l'evenement
     for cam, buffered in self.buffers.items():
@@ -208,10 +228,10 @@ class EventRecorder:
     if not self.recording:
       return None
     path = self.path
-    meta = read_json(os.path.join(path, "meta.json"))
-    meta.update({"triggers": self.triggers, "frames": self.frames, "closed": time.time()})
+    meta = self._meta()
+    meta["closed"] = time.time()
     self._write_meta(meta)
-    self.path, self.triggers, self.index = None, [], 0
+    self.path, self.triggers, self.details, self.index = None, [], {}, 0
     return path
 
 
@@ -397,7 +417,7 @@ class Sentry:
     """frames : prefixe de camera -> (plan Y, fonction rendant le JPEG)."""
     for cam, (y, _) in frames.items():
       if cam in self.motion and self.motion[cam].update(y):
-        self.recorder.trigger("motion", now, {"camera": cam})
+        self.recorder.trigger("motion", now, {"motion_cameras": [cam]})
 
     if self.disk_full:
       return
@@ -415,7 +435,8 @@ class Sentry:
   def status(self) -> dict:
     return {"armed": self.armed(), "recording": self.recorder.recording,
             "power_w": self.power_w, "som_w": self.som_w,
-            "triggers": list(self.recorder.triggers), "voltage_mv": self.voltage_mv,
+            "triggers": list(self.recorder.triggers),
+            "motion_cameras": list(self.recorder.details.get("motion_cameras") or []), "voltage_mv": self.voltage_mv,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,

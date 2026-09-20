@@ -543,3 +543,72 @@ class TestAutoArm:
   def test_manual_arming_still_works_with_the_switch_off(self):
     state.arm()
     assert state.is_armed() is True
+
+
+class TestMotionCamera:
+  """Savoir quelle camera a vu bouger : c'est elle qu'on ira regarder en premier."""
+
+  @pytest.fixture(autouse=True)
+  def _root(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(state, "ARMED_PATH", str(tmp_path / "armed"))
+    monkeypatch.setattr(state, "MIN_VOLTAGE_PATH", str(tmp_path / "min_voltage"))
+    state.arm()
+    self.root = str(tmp_path / "events")
+
+  def _meta(self, rec):
+    return json.loads(open(os.path.join(rec.path, "meta.json")).read())
+
+  def test_the_camera_is_noted_when_the_event_opens(self):
+    rec = sentineld.EventRecorder(self.root)
+    rec.trigger("motion", 0., {"motion_cameras": ["e"]})
+
+    assert self._meta(rec)["motion_cameras"] == ["e"]
+
+  def test_a_second_camera_is_added_during_the_event(self):
+    rec = sentineld.EventRecorder(self.root)
+    rec.trigger("motion", 0., {"motion_cameras": ["f"]})
+    rec.trigger("motion", 1., {"motion_cameras": ["d"]})
+
+    assert self._meta(rec)["motion_cameras"] == ["f", "d"]
+
+  def test_the_same_camera_is_not_listed_twice(self):
+    rec = sentineld.EventRecorder(self.root)
+    for t in range(4):
+      rec.trigger("motion", float(t), {"motion_cameras": ["f"]})
+
+    assert self._meta(rec)["motion_cameras"] == ["f"]
+
+  def test_motion_and_can_details_coexist(self):
+    rec = sentineld.EventRecorder(self.root)
+    rec.trigger("can", 0., {"can_buses": [0]})
+    rec.trigger("motion", 1., {"motion_cameras": ["e"]})
+    meta = self._meta(rec)
+
+    assert meta["triggers"] == ["can", "motion"]
+    assert meta["can_buses"] == [0] and meta["motion_cameras"] == ["e"]
+
+  def test_the_detail_survives_the_closing(self):
+    rec = sentineld.EventRecorder(self.root, post_event_s=1.)
+    rec.trigger("motion", 0., {"motion_cameras": ["f", "e"]})
+    path = rec.path
+    rec.tick(10.)
+
+    meta = json.loads(open(os.path.join(path, "meta.json")).read())
+    assert meta["motion_cameras"] == ["f", "e"] and "closed" in meta
+
+  def test_a_new_event_starts_with_a_clean_slate(self):
+    rec = sentineld.EventRecorder(self.root, post_event_s=1.)
+    rec.trigger("motion", 0., {"motion_cameras": ["d"]})
+    rec.tick(10.)
+    rec.trigger("motion", 20., {"motion_cameras": ["f"]})
+
+    assert self._meta(rec)["motion_cameras"] == ["f"]
+
+  def test_the_sentry_reports_the_camera_that_saw_it(self, tmp_path):
+    s = sentineld.Sentry(str(tmp_path / "ev"))
+    still, moving = frame(), frame()
+    moving[20:90, 20:110] = 220
+    s.on_frames({"e": (still, lambda: b"jpeg")}, 0.)
+    s.on_frames({"e": (moving, lambda: b"jpeg")}, 1.)
+
+    assert s.status()["motion_cameras"] == ["e"]
