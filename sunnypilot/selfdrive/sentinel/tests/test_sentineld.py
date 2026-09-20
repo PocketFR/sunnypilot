@@ -500,3 +500,46 @@ class TestPowerTrace:
     s.power_w, s.som_w = 6.5, 3.0
 
     assert s.status()["power_w"] == 6.5 and s.status()["som_w"] == 3.0
+
+
+class TestAutoArm:
+  """Armement automatique a l'arret du moteur, reglable depuis l'ecran."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "ARMED_PATH", str(tmp_path / "sentry_armed"))
+    monkeypatch.setattr(state, "AUTO_PATH", str(tmp_path / "sentry_auto"))
+
+  def test_off_by_default(self):
+    assert state.auto_enabled() is False
+    assert state.should_auto_arm(ignition=False, ignition_prev=True) is False
+
+  def test_the_switch_persists_both_ways(self):
+    state.set_auto(True)
+    assert state.auto_enabled() is True
+    state.set_auto(False)
+    assert state.auto_enabled() is False
+
+  def test_it_arms_when_the_engine_stops(self):
+    state.set_auto(True)
+    assert state.should_auto_arm(ignition=False, ignition_prev=True) is True
+
+  def test_it_does_nothing_while_the_engine_runs(self):
+    state.set_auto(True)
+    assert state.should_auto_arm(ignition=True, ignition_prev=True) is False
+    assert state.should_auto_arm(ignition=True, ignition_prev=False) is False
+
+  def test_it_does_not_re_arm_a_watch_that_stopped_itself(self):
+    """Batterie basse : la veille s'arrete et se desarme. Sans front de contact, elle
+    ne doit pas repartir en boucle et achever la batterie."""
+    state.set_auto(True)
+    assert state.should_auto_arm(ignition=False, ignition_prev=False) is False
+
+  def test_it_does_not_arm_twice(self):
+    state.set_auto(True)
+    state.arm()
+    assert state.should_auto_arm(ignition=False, ignition_prev=True) is False
+
+  def test_manual_arming_still_works_with_the_switch_off(self):
+    state.arm()
+    assert state.is_armed() is True

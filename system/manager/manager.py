@@ -169,6 +169,12 @@ def manager_thread() -> None:
       sentinel_state.disarm()
       cloudlog.info("sentry mode disarmed by ignition")
 
+    # Et l'inverse, si l'armement automatique est actif : couper le moteur met la
+    # sentinelle en veille, sans redemarrage, les portes des processus suivent.
+    if sentinel_state.should_auto_arm(ignition, ignition_prev):
+      sentinel_state.arm()
+      cloudlog.info("sentry mode armed automatically at ignition off")
+
     # update onroad params, which drives pandad's safety setter thread
     if started != started_prev:
       write_onroad_params(started, params)

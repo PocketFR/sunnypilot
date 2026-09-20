@@ -17,6 +17,7 @@ import os
 
 ARMED_PATH = "/data/sentry_armed"
 RUNNING_PATH = "/data/sentry_running"
+AUTO_PATH = "/data/sentry_auto"
 MIN_VOLTAGE_PATH = "/data/sentry_min_voltage"
 STATUS_PATH = "/data/sentry_status.json"
 
@@ -91,3 +92,32 @@ def clear_running() -> None:
 
 def was_running() -> bool:
   return os.path.exists(RUNNING_PATH)
+
+
+def auto_enabled() -> bool:
+  return os.path.exists(AUTO_PATH)
+
+
+def set_auto(enabled: bool) -> None:
+  """Armement automatique a l'arret du moteur, reglable depuis l'ecran."""
+  if enabled:
+    try:
+      with open(AUTO_PATH, "w") as f:
+        f.write("1")
+    except OSError:
+      pass
+  else:
+    try:
+      os.unlink(AUTO_PATH)
+    except OSError:
+      pass
+
+
+def should_auto_arm(ignition: bool, ignition_prev: bool) -> bool:
+  """Vrai au front descendant du contact : le moteur vient d'etre coupe.
+
+  On n'arme que sur la transition, jamais tant que la voiture reste a l'arret : si la
+  veille s'est arretee d'elle-meme, batterie basse par exemple, elle ne doit pas
+  repartir en boucle. Il faudra un nouveau cycle de contact.
+  """
+  return auto_enabled() and ignition_prev and not ignition and not is_armed()
