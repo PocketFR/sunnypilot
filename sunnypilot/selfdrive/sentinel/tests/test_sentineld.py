@@ -612,3 +612,75 @@ class TestMotionCamera:
     s.on_frames({"e": (moving, lambda: b"jpeg")}, 1.)
 
     assert s.status()["motion_cameras"] == ["e"]
+
+
+class TestMotionAgainstFoliage:
+  """Le vent dans les arbres declenchait : il fait du grain disperse, pas une tache."""
+
+  @pytest.fixture(autouse=True)
+  def _defaults(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "MOTION_DELTA_PATH", str(tmp_path / "delta"))
+    monkeypatch.setattr(state, "MOTION_AREA_PATH", str(tmp_path / "area"))
+
+  def _scattered(self, base, n=400, seed=0):
+    """Des cellules isolees qui changent partout : le feuillage agite."""
+    rng = np.random.default_rng(seed)
+    out = base.copy()
+    ys = rng.integers(0, base.shape[0], n)
+    xs = rng.integers(0, base.shape[1], n)
+    out[ys, xs] = 255
+    return out
+
+  def test_scattered_change_does_not_trigger(self):
+    d = sentineld.MotionDetector()
+    base = frame(width=1344, height=760)
+    d.update(base)
+
+    assert d.update(self._scattered(base)) is False
+
+  def test_a_solid_shape_still_triggers(self):
+    d = sentineld.MotionDetector()
+    base = frame(width=1344, height=760)
+    d.update(base)
+    person = base.copy()
+    person[300:600, 400:700] = 220        # une silhouette proche
+
+    assert d.update(person) is True
+
+  def test_the_grouped_score_is_far_below_the_scattered_one(self):
+    """C'est ce rapport qui separe le vent d'une personne : mesure 0,44 % contre 14,5 %."""
+    base = frame(width=1344, height=760)
+    d1, d2 = sentineld.MotionDetector(), sentineld.MotionDetector()
+    d1.score(base), d2.score(base)
+    person = base.copy()
+    person[300:600, 400:700] = 220
+
+    assert d1.score(self._scattered(base)) < 0.2 * d2.score(person)
+
+  def test_the_threshold_is_tunable_without_touching_the_code(self, tmp_path):
+    with open(state.MOTION_AREA_PATH, "w") as f:
+      f.write("0.5\n")     # exige que la moitie de l'image bouge
+    with open(state.MOTION_DELTA_PATH, "w") as f:
+      f.write("30\n")
+
+    d = sentineld.MotionDetector()
+    assert d.area == 0.5 and d.delta == 30
+
+    base = frame(width=1344, height=760)
+    d.update(base)
+    person = base.copy()
+    person[300:600, 400:700] = 220
+    assert d.update(person) is False      # la silhouette ne suffit plus, comme demande
+
+  def test_a_broken_setting_falls_back_to_the_default(self):
+    with open(state.MOTION_AREA_PATH, "w") as f:
+      f.write("beaucoup")
+
+    assert state.motion_area() == state.DEFAULT_MOTION_AREA
+    assert state.motion_delta() == state.DEFAULT_MOTION_DELTA
+
+  def test_a_global_brightness_change_still_does_not_trigger(self):
+    d = sentineld.MotionDetector()
+    d.update(frame(width=1344, height=760, value=100))
+
+    assert d.update(frame(width=1344, height=760, value=160)) is False
