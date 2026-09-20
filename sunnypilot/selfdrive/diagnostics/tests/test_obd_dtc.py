@@ -357,6 +357,39 @@ class TestAutomaticRecalibration:
     assert not thread.is_alive() and self.log_path.read_text() == self.stale
 
 
+class TestLogSize:
+  """Le journal vit sur /data : il doit rester borne tout seul."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    self.log_path = tmp_path / "dtc_log.txt"
+    monkeypatch.setattr(obd_dtc, "LOG_PATH", str(self.log_path))
+    monkeypatch.setattr(obd_dtc, "LOG_MAX_BYTES", 2000)
+    monkeypatch.setattr(obd_dtc, "LOG_KEEP_LINES", 5)
+
+  def test_a_small_log_is_left_alone(self):
+    for i in range(3):
+      obd_dtc._log("ligne %d" % i)
+
+    assert len(self.log_path.read_text().splitlines()) == 3
+
+  def test_an_oversized_log_keeps_only_the_newest_lines(self):
+    for i in range(200):
+      obd_dtc._log("ligne %d" % i)
+
+    lines = self.log_path.read_text().splitlines()
+    assert self.log_path.stat().st_size <= obd_dtc.LOG_MAX_BYTES     # la borne tient
+    assert lines[-1].endswith("ligne 199")                           # la derniere est conservee
+    assert not any(ln.endswith("ligne 0") for ln in lines)           # les plus vieilles sont parties
+
+  def test_trimmed_lines_stay_readable_for_the_recalibration(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: True)
+    for i in range(200):
+      obd_dtc._log("ligne %d" % i)
+
+    assert all(obd_dtc.LOG_LINE.match(ln) for ln in self.log_path.read_text().splitlines())
+
+
 class TestReadOthers:
   def test_returns_codes_of_answering_ecus(self):
     p = FakePanda([SCC], dtcs={SCC: [(0x56, 0x38)]})  # C1638
