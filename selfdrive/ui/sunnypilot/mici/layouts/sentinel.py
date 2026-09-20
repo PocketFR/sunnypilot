@@ -8,7 +8,7 @@ import time
 
 from collections.abc import Callable
 
-from openpilot.selfdrive.ui.mici.widgets.button import BigButton
+from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigToggle
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.diagnostics import ICON_SIZE, InfoBlock
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -38,11 +38,15 @@ class SentinelLayoutMici(NavScroller):
 
     # Pas de bouton de desarmement : demarrer le moteur est la seule sortie, et c'est
     # ce qui tient lieu d'authentification. Voir sentineld, arret sur contact mis.
-    self._scroller.add_widgets([self._state, self._power, self._arm_btn])
+    self._auto_btn = BigToggle(tr("arm at engine off"), "", initial_state=state.auto_enabled(),
+                               toggle_callback=state.set_auto)
+
+    self._scroller.add_widgets([self._state, self._power, self._arm_btn, self._auto_btn])
 
   def show_event(self):
     super().show_event()
     self._status = state.read_status()
+    self._auto_btn.set_checked(state.auto_enabled())
     self._refresh()
 
   def _refresh(self) -> None:
