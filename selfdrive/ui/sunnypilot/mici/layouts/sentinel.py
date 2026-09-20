@@ -36,11 +36,9 @@ class SentinelLayoutMici(NavScroller):
     self._arm_btn.set_click_callback(self._arm_prompt)
     self._arm_btn.set_enabled(self._can_arm)
 
-    self._disarm_btn = BigButton(tr("disarm"), "")
-    self._disarm_btn.set_click_callback(self._disarm_prompt)
-    self._disarm_btn.set_enabled(self._armed)
-
-    self._scroller.add_widgets([self._state, self._power, self._arm_btn, self._disarm_btn])
+    # Pas de bouton de desarmement : demarrer le moteur est la seule sortie, et c'est
+    # ce qui tient lieu d'authentification. Voir sentineld, arret sur contact mis.
+    self._scroller.add_widgets([self._state, self._power, self._arm_btn])
 
   def show_event(self):
     super().show_event()
@@ -80,13 +78,6 @@ class SentinelLayoutMici(NavScroller):
     state.arm()
     ui_state.params.put_bool("DoReboot", True)
 
-  def _disarm(self) -> None:
-    state.disarm()
-
   def _arm_prompt(self) -> None:
     gui_app.push_widget(BigConfirmationDialog(tr("slide to arm sentry and reboot"), self._icon,
                                               confirm_callback=self._arm))
-
-  def _disarm_prompt(self) -> None:
-    gui_app.push_widget(BigConfirmationDialog(tr("slide to disarm sentry"), self._icon, red=True,
-                                              confirm_callback=self._disarm))

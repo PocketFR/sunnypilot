@@ -19,6 +19,9 @@ WEBCAM = os.getenv("USE_WEBCAM") is not None
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
 
+def not_sentinel(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return not sentinel(started, params, CP)
+
 def sentinel(started: bool, params: Params, CP: car.CarParams) -> bool:
   # mode sentinelle : arme depuis l'ecran, et seulement voiture a l'arret. L'etat tient
   # dans un fichier et non dans un parametre : l'appareil tourne une version precompilee,
@@ -133,7 +136,9 @@ procs = [
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC),
-  PythonProcess("ui", "selfdrive.ui.ui", always_run, restart_if_crash=True),
+  # pendant la veille, pas d'interface : l'ecran reste noir et le seul moyen de
+  # desarmer est de demarrer le moteur, qui fait office d'authentification
+  PythonProcess("ui", "selfdrive.ui.ui", not_sentinel, restart_if_crash=True),
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
