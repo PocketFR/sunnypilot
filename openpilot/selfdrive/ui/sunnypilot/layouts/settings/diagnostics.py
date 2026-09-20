@@ -22,10 +22,10 @@ if gui_app.sunnypilot_ui():
 DESCRIPTIONS = {
   'read': tr_noop("Read the engine fault codes. The panda can only have one master, so openpilot restarts and reads "
                   "them at startup, before it takes control of the car."),
-  'clear': tr_noop("Erase the stored fault codes of the engine, the cruise control radar and the ABS. The last two "
-                   "log a lost communication every time openpilot silences the radar to control the brakes. This also "
-                   "resets the emissions readiness monitors, which can fail the OBD part of a roadworthiness test "
-                   "until the car has completed its drive cycles."),
+  'clear': tr_noop("Erase the stored fault codes of the engine, the cruise control radar, the ABS and the power "
+                   "steering. The last three log a lost communication every time openpilot silences the radar to "
+                   "control the brakes. This also resets the emissions readiness monitors, which can fail the OBD "
+                   "part of a roadworthiness test until the car has completed its drive cycles."),
 }
 
 
@@ -93,7 +93,7 @@ class DiagnosticsLayout(Widget):
     return self._stopped() and not ui_state.engaged
 
   def _clearable(self) -> list[str]:
-    """Ce que l'effacement vise : le moteur, plus le SCC et l'ABS (voir obd_dtc.CLEAR_ECUS)."""
+    """Ce que l'effacement vise : le moteur, plus les calculateurs chassis (obd_dtc.CLEAR_ECUS)."""
     others = self._status.get("other_ecus") or {}
     engine = sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |
                     set(self._status.get("pending") or []))
