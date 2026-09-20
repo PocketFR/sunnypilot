@@ -104,7 +104,11 @@ class DiagnosticsLayoutMici(NavScroller):
     stamp = self._status.get("time")
     if not stamp:
       return tr("never")
-    return time.strftime("%d/%m/%Y %H:%M", time.localtime(stamp))
+    text = time.strftime("%d/%m/%Y %H:%M", time.localtime(stamp))
+    if (self._status.get("attempt") or {}).get("engine_off"):
+      # releve conserve : la derniere tentative a eu lieu contact coupe
+      text += " · " + tr("engine off")
+    return text
 
   def _codes(self) -> list[str]:
     return sorted(set(self._status.get("stored") or []) | set(self._status.get("confirmed") or []) |

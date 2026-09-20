@@ -263,6 +263,100 @@ class TestLogTimes:
     assert self.path.read_text() == original
 
 
+class TestEngineOff:
+  """Reveil sur activite du bus, cles approchees : les calculateurs dorment."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    self.status_path = tmp_path / "dtc_status.json"
+    monkeypatch.setattr(obd_dtc, "STATUS_PATH", str(self.status_path))
+    monkeypatch.setattr(obd_dtc, "LOG_PATH", str(tmp_path / "dtc_log.txt"))
+    monkeypatch.setattr(obd_dtc, "REQUEST_PATH", str(tmp_path / "dtc_request"))
+
+  def test_a_run_without_answer_is_flagged_engine_off(self, monkeypatch, tmp_path):
+    device = FakePandaDevice([])  # personne ne repond
+    monkeypatch.setitem(sys.modules, "panda", types.SimpleNamespace(Panda=lambda: device))
+    monkeypatch.setattr(obd_dtc.time, "sleep", lambda _: None)
+    status = obd_dtc._run(do_clear=False)
+
+    assert status["engine_off"] is True and status["ok"] is False
+
+  def test_the_previous_reading_is_kept(self, monkeypatch):
+    good = {"time": 1_774_000_000.0, "mono": 12.0, "boot_id": "avant", "ok": True,
+            "mil": False, "stored": [], "pending": [], "confirmed": [], "failed_since_clear": [],
+            "scc_restored": True, "other_ecus": {"scc": ["C1638"]}}
+    self.status_path.write_text(json.dumps(good))
+    monkeypatch.setattr(obd_dtc, "_run", lambda do_clear: {"time": time.time(), "mono": time.monotonic(),
+                                                           "boot_id": obd_dtc._boot_id(), "ok": False,
+                                                           "engine_off": True, "error": "timeout"})
+    obd_dtc.main()
+
+    kept = json.loads(self.status_path.read_text())
+    assert kept["ok"] is True and kept["other_ecus"] == {"scc": ["C1638"]}
+    assert kept["time"] == good["time"]
+    assert kept["attempt"]["engine_off"] is True   # le panneau peut le signaler
+
+  def test_a_real_failure_still_replaces_the_reading(self, monkeypatch):
+    self.status_path.write_text(json.dumps({"time": 1.0, "ok": True, "mil": False, "stored": [],
+                                            "pending": [], "confirmed": [], "failed_since_clear": [],
+                                            "scc_restored": True}))
+    monkeypatch.setattr(obd_dtc, "_run", lambda do_clear: {"time": time.time(), "mono": time.monotonic(),
+                                                           "boot_id": obd_dtc._boot_id(), "ok": False,
+                                                           "error": "PandaError: pas de panda"})
+    obd_dtc.main()
+
+    assert json.loads(self.status_path.read_text())["ok"] is False
+
+  def test_nothing_to_keep_leaves_the_failed_reading(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "_run", lambda do_clear: {"time": time.time(), "mono": time.monotonic(),
+                                                           "boot_id": obd_dtc._boot_id(), "ok": False,
+                                                           "engine_off": True, "error": "timeout"})
+    obd_dtc.main()
+
+    assert json.loads(self.status_path.read_text())["engine_off"] is True
+
+
+class TestAutomaticRecalibration:
+  """Le recalage ne doit demander aucune action : il attend la mise a l'heure."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    self.log_path = tmp_path / "dtc_log.txt"
+    monkeypatch.setattr(obd_dtc, "LOG_PATH", str(self.log_path))
+    monkeypatch.setattr(obd_dtc, "STATUS_PATH", str(tmp_path / "dtc_status.json"))
+    self.stale = "2026-03-24 14:46:14 (t+%ds %s) voyant=eteint\n" % (time.monotonic() - 20, obd_dtc._boot_id()[:8])
+    self.log_path.write_text(self.stale)
+
+  def _stamp(self) -> float:
+    m = obd_dtc.LOG_LINE.match(self.log_path.read_text().rstrip("\n"))
+    return time.mktime(time.strptime(m.group(1), obd_dtc.TIME_FORMAT))
+
+  def test_clock_already_set_recalibrates_right_away(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: True)
+
+    assert obd_dtc.fix_log_when_clock_is_set() is None  # rien a attendre
+    assert abs(self._stamp() - (time.time() - 20)) < 5
+
+  def test_it_waits_for_the_clock_on_its_own(self, monkeypatch):
+    ready = []
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: bool(ready))
+
+    thread = obd_dtc.fix_log_when_clock_is_set(poll=0.01, wait=10)
+    assert thread is not None and self.log_path.read_text() == self.stale  # rien tant que l'heure est fausse
+
+    ready.append(True)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert abs(self._stamp() - (time.time() - 20)) < 5
+
+  def test_it_gives_up_instead_of_watching_forever(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: False)
+
+    thread = obd_dtc.fix_log_when_clock_is_set(poll=0.01, wait=0.05)
+    thread.join(timeout=5)
+    assert not thread.is_alive() and self.log_path.read_text() == self.stale
+
+
 class TestReadOthers:
   def test_returns_codes_of_answering_ecus(self):
     p = FakePanda([SCC], dtcs={SCC: [(0x56, 0x38)]})  # C1638
