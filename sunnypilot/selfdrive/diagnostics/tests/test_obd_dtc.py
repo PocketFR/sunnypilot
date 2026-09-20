@@ -160,6 +160,8 @@ class TestStatusTime:
     path = tmp_path / "dtc_status.json"
     path.write_text(json.dumps(status))
     monkeypatch.setattr(obd_dtc, "STATUS_PATH", str(path))
+    monkeypatch.setattr(obd_dtc, "LOG_PATH", str(tmp_path / "dtc_log.txt"))
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: True)
     return path
 
   def test_same_boot_recovers_the_real_time(self, monkeypatch, tmp_path):
@@ -186,11 +188,79 @@ class TestStatusTime:
     self._write(monkeypatch, tmp_path, {"time": 1_700_000_000.0, "ok": True})
     assert obd_dtc.read_status()["time"] == 1_700_000_000.0
 
+  def test_nothing_is_corrected_while_the_clock_is_wrong(self, monkeypatch, tmp_path):
+    self._write(monkeypatch, tmp_path, {"time": 1_700_000_000.0, "mono": time.monotonic() - 10,
+                                        "boot_id": obd_dtc._boot_id(), "ok": True})
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: False)
+    assert obd_dtc.read_status()["time"] == 1_700_000_000.0
+
   def test_a_run_records_what_the_correction_needs(self, fake_panda):
     status = obd_dtc._run(do_clear=False)
 
     assert status["boot_id"] == obd_dtc._boot_id()
     assert abs(status["mono"] - time.monotonic()) < 5
+
+
+class TestLogTimes:
+  """Les lignes ecrites au demarrage portent une fausse heure murale, on les recale."""
+
+  @pytest.fixture(autouse=True)
+  def _log_file(self, monkeypatch, tmp_path):
+    self.path = tmp_path / "dtc_log.txt"
+    monkeypatch.setattr(obd_dtc, "LOG_PATH", str(self.path))
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: True)
+
+  def _line(self, stamp: str, mono: float, boot: str, msg: str = "voyant=eteint") -> str:
+    return "%s (t+%ds %s) %s\n" % (stamp, mono, boot, msg)
+
+  def test_log_carries_uptime_and_boot(self):
+    obd_dtc._log("coucou")
+
+    assert obd_dtc.LOG_LINE.match(self.path.read_text().rstrip("\n"))
+
+  def test_current_boot_line_is_recalibrated(self):
+    mono = time.monotonic() - 20
+    self.path.write_text(self._line("2026-03-24 14:46:14", mono, obd_dtc._boot_id()[:8]))
+    obd_dtc._fix_log_times()
+
+    m = obd_dtc.LOG_LINE.match(self.path.read_text().rstrip("\n"))
+    written = time.mktime(time.strptime(m.group(1), obd_dtc.TIME_FORMAT))
+    assert abs(written - (time.time() - 20)) < 5
+    assert m.group(4) == "voyant=eteint"  # le message est conserve
+
+  def test_other_boots_and_legacy_lines_are_untouched(self):
+    original = (self._line("2026-03-24 14:46:14", 31, "deadbeef") +
+                "2026-09-19 07:32:17 efface : ['P0171']\n")
+    self.path.write_text(original)
+    obd_dtc._fix_log_times()
+
+    assert self.path.read_text() == original
+
+  def test_correct_lines_are_left_alone(self):
+    mono = time.monotonic() - 5
+    original = self._line(time.strftime(obd_dtc.TIME_FORMAT, time.localtime(time.time() - 5)),
+                          mono, obd_dtc._boot_id()[:8])
+    self.path.write_text(original)
+    obd_dtc._fix_log_times()
+
+    assert self.path.read_text() == original
+
+  def test_a_manager_start_also_recalibrates(self, monkeypatch):
+    """Le bouton relance openpilot sans redemarrer le systeme : meme demarrage, horloge juste."""
+    monkeypatch.setattr(obd_dtc.subprocess, "run", lambda *a, **k: None)
+    self.path.write_text(self._line("2026-03-24 14:46:14", time.monotonic() - 20, obd_dtc._boot_id()[:8]))
+    obd_dtc.scan_at_boot()
+
+    m = obd_dtc.LOG_LINE.match(self.path.read_text().rstrip("\n"))
+    assert abs(time.mktime(time.strptime(m.group(1), obd_dtc.TIME_FORMAT)) - (time.time() - 20)) < 5
+
+  def test_nothing_is_touched_while_the_clock_is_wrong(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "_clock_is_set", lambda: False)
+    original = self._line("2026-03-24 14:46:14", time.monotonic() - 20, obd_dtc._boot_id()[:8])
+    self.path.write_text(original)
+    obd_dtc._fix_log_times()
+
+    assert self.path.read_text() == original
 
 
 class TestReadOthers:
