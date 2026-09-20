@@ -445,3 +445,58 @@ class TestBootEvent:
     state.clear_running()
     state.clear_running()
     assert state.was_running() is False
+
+
+class TestPowerTrace:
+  """Le releve qui sert a dimensionner une batterie auxiliaire."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    self.path = str(tmp_path / "sentry_power.csv")
+    monkeypatch.setattr(state, "ARMED_PATH", str(tmp_path / "sentry_armed"))
+    monkeypatch.setattr(state, "MIN_VOLTAGE_PATH", str(tmp_path / "min_voltage"))
+    state.arm()
+
+  def _row(self, **kw):
+    row = {"time": 1_789_900_000.0, "mono": 42.5, "boot": "3f2a1c9d", "voltage_mv": 12400,
+           "power_w": 6.8, "som_w": 3.1, "recording": 0, "events": 4}
+    row.update(kw)
+    return row
+
+  def test_the_file_starts_with_its_header(self):
+    sentineld.append_trace(self._row(), self.path)
+    lines = open(self.path).read().splitlines()
+
+    assert lines[0].startswith("time,mono,boot,voltage_mv,power_w")
+    assert lines[1] == "1789900000,42.5,3f2a1c9d,12400,6.80,3.10,0,4"
+
+  def test_rows_accumulate(self):
+    for i in range(5):
+      sentineld.append_trace(self._row(mono=i * 30.), self.path)
+
+    assert len(open(self.path).read().splitlines()) == 6   # entete plus cinq lignes
+
+  def test_the_file_stays_bounded(self, monkeypatch):
+    monkeypatch.setattr(sentineld, "TRACE_MAX_BYTES", 400)
+    monkeypatch.setattr(sentineld, "TRACE_KEEP_LINES", 5)
+    for i in range(200):
+      sentineld.append_trace(self._row(mono=i * 30.), self.path)
+
+    lines = open(self.path).read().splitlines()
+    assert os.path.getsize(self.path) <= 400 * 2   # borne respectee apres coupe
+    assert lines[0].startswith("time,")            # entete conservee
+    assert lines[-1].split(",")[1] == "5970.0"     # la derniere mesure est gardee
+
+  def test_the_row_carries_what_the_analysis_needs(self, tmp_path):
+    s = sentineld.Sentry(str(tmp_path / "events"))
+    s.voltage_mv, s.power_w, s.som_w = 12380, 7.2, 3.4
+    row = s.trace_row()
+
+    assert row["voltage_mv"] == 12380 and row["power_w"] == 7.2 and row["som_w"] == 3.4
+    assert row["boot"] == sentineld.boot_id()[:8] and row["recording"] == 0
+
+  def test_status_reports_the_power_too(self, tmp_path):
+    s = sentineld.Sentry(str(tmp_path / "events"))
+    s.power_w, s.som_w = 6.5, 3.0
+
+    assert s.status()["power_w"] == 6.5 and s.status()["som_w"] == 3.0
