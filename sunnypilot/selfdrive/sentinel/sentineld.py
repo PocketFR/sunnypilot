@@ -55,32 +55,45 @@ TRACE_MAX_BYTES = 512 * 1024
 TRACE_KEEP_LINES = 2000
 TRACE_HEADER = "time,mono,boot,voltage_mv,power_w,som_w,recording,events\n"
 
-# Mouvement : ecart d'intensite par cellule, et part des cellules qui doivent bouger
+# Mouvement : pas de sous-echantillonnage. L'ecart et la surface sont dans state.py,
+# reglables par fichier sans toucher au code.
 MOTION_STEP = 16
-MOTION_DELTA = 12
-MOTION_AREA = 0.01
 
 
 class MotionDetector:
   """Compare deux images sur le plan de luminance seul, sous-echantillonne.
 
-  L'ecart median est retire avant le seuillage : un nuage qui passe ou un lampadaire qui
-  s'allume decalent toute l'image, ce n'est pas du mouvement.
+  Deux filtres, chacun contre une fausse alerte precise :
+
+  - l'ecart median est retire avant le seuillage, car un nuage qui passe ou un lampadaire
+    qui s'allume decalent toute l'image d'un bloc ;
+  - seules les cellules formant un carre de 2x2 sont comptees, car le vent dans les arbres
+    fait du grain disperse la ou une personne fait une tache. Mesure sur des evenements
+    reels : ce filtre fait passer le rapport entre les deux de 5 a 33.
   """
 
-  def __init__(self, step: int = MOTION_STEP, delta: int = MOTION_DELTA, area: float = MOTION_AREA):
-    self.step, self.delta, self.area = step, delta, area
+  def __init__(self, step: int = MOTION_STEP, delta: int | None = None, area: float | None = None):
+    self.step = step
+    self.delta = state.motion_delta() if delta is None else delta
+    self.area = state.motion_area() if area is None else area
     self.previous: np.ndarray | None = None
 
-  def update(self, y: np.ndarray) -> bool:
+  def score(self, y: np.ndarray) -> float:
+    """Part des cellules en mouvement groupe, entre 0 et 1. -1 sans image precedente."""
     cells = y[::self.step, ::self.step].astype(np.int16)
     previous, self.previous = self.previous, cells
     if previous is None or previous.shape != cells.shape:
-      return False
+      return -1.
 
     diff = cells - previous
     moved = np.abs(diff - np.median(diff)) > self.delta
-    return bool(moved.mean() > self.area)
+    if moved.shape[0] < 2 or moved.shape[1] < 2:
+      return float(moved.mean())
+    grouped = moved[:-1, :-1] & moved[1:, :-1] & moved[:-1, 1:] & moved[1:, 1:]
+    return float(grouped.mean())
+
+  def update(self, y: np.ndarray) -> bool:
+    return self.score(y) > self.area
 
 
 def extract_y(buf) -> np.ndarray:

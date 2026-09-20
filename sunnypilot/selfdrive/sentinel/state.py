@@ -19,11 +19,20 @@ ARMED_PATH = "/data/sentry_armed"
 RUNNING_PATH = "/data/sentry_running"
 AUTO_PATH = "/data/sentry_auto"
 MIN_VOLTAGE_PATH = "/data/sentry_min_voltage"
+MOTION_DELTA_PATH = "/data/sentry_motion_delta"
+MOTION_AREA_PATH = "/data/sentry_motion_area"
 STATUS_PATH = "/data/sentry_status.json"
 
 # Seuil d'arret par defaut, en millivolts : la valeur openpilot VBATT_PAUSE_CHARGING.
 # Hors contact la batterie ne se recharge pas, c'est la seule protection reelle.
 DEFAULT_MIN_VOLTAGE_MV = 11800
+
+# Mouvement : ecart d'intensite d'une cellule, et part des cellules qui doivent bouger.
+# Mesure sur des evenements reels : une personne qui tourne autour de la voiture donne
+# 14,5 % de cellules en mouvement, le vent dans les arbres 0,44 % au pire. Le seuil a
+# 1 % laisse donc un facteur 2 d'un cote et 14 de l'autre.
+DEFAULT_MOTION_DELTA = 12
+DEFAULT_MOTION_AREA = 0.01
 
 
 def is_armed() -> bool:
@@ -121,3 +130,21 @@ def should_auto_arm(ignition: bool, ignition_prev: bool) -> bool:
   repartir en boucle. Il faudra un nouveau cycle de contact.
   """
   return auto_enabled() and ignition_prev and not ignition and not is_armed()
+
+
+def _read_number(path: str, default, cast):
+  try:
+    with open(path) as f:
+      return cast(f.read().strip())
+  except (OSError, ValueError):
+    return default
+
+
+def motion_delta() -> int:
+  """Reglable a chaud : echo 20 > /data/sentry_motion_delta"""
+  return _read_number(MOTION_DELTA_PATH, DEFAULT_MOTION_DELTA, int)
+
+
+def motion_area() -> float:
+  """Reglable a chaud : echo 0.02 > /data/sentry_motion_area"""
+  return _read_number(MOTION_AREA_PATH, DEFAULT_MOTION_AREA, float)
