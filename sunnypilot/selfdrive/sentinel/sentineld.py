@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import time
 from collections import deque
 
@@ -457,6 +458,21 @@ class Sentry:
             "time": time.time(), "mono": time.monotonic(), "boot_id": boot_id()}
 
 
+def finish(sentry) -> bool:
+  """Fermeture propre. Retourne True s'il faut eteindre l'appareil.
+
+  Le marqueur est retire ici : un arret ordonne, redemarrage ou extinction, ne doit pas
+  passer pour une coupure de courant au demarrage suivant. Seule une veille interrompue
+  net laisse le marqueur derriere elle.
+  """
+  sentry.recorder.close()
+  state.clear_running()
+  if sentry.stop_reason in ("ignition", "voltage"):
+    state.disarm()
+  write_status(sentry.status())
+  return sentry.stop_reason == "voltage"
+
+
 def main() -> None:
   import cereal.messaging as messaging
   from msgq.visionipc import VisionIpcClient, VisionStreamType
@@ -506,11 +522,22 @@ def main() -> None:
   clients = {cam: VisionIpcClient("camerad", getattr(VisionStreamType, stream), True)
              for cam, stream in CAMERAS.items()}
 
+  stopping = False
+
+  def on_signal(*_):
+    """Le manager arrete le service par un signal : on sort de la boucle pour passer
+    par la fermeture propre, au lieu de mourir en laissant le marqueur."""
+    nonlocal stopping
+    stopping = True
+
+  signal.signal(signal.SIGINT, on_signal)
+  signal.signal(signal.SIGTERM, on_signal)
+
   recalibrated = False
   last_status = last_prune = last_trace = 0.
   rk = Ratekeeper(2.0, print_delay_threshold=None)
 
-  while True:
+  while not stopping:
     now = time.monotonic()
     sm.update(0)
 
@@ -557,12 +584,7 @@ def main() -> None:
 
     rk.keep_time()
 
-  sentry.recorder.close()
-  state.clear_running()   # arret volontaire : le prochain demarrage ne criera pas a la coupure
-  if sentry.stop_reason in ("ignition", "voltage"):
-    state.disarm()
-  write_status(sentry.status())
-  if sentry.stop_reason == "voltage":
+  if finish(sentry):
     # hors contact la batterie ne se recharge pas : on rend la main avant de la vider
     Params().put_bool("DoShutdown", True)
 
