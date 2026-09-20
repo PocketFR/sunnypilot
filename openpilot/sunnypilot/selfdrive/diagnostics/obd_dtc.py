@@ -65,9 +65,11 @@ def dtc_str(b0: int, b1: int) -> str:
 
 
 def _log(msg: str) -> None:
+  """Horodate aussi en secondes depuis le demarrage : au boot l'horloge murale est
+  encore a la date par defaut d'AGNOS, le temps monotone permet de s'y retrouver."""
   try:
     with open(LOG_PATH, "a") as f:
-      f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+      f.write("%s (t+%ds) %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), time.monotonic(), msg))
   except OSError:
     pass
 
@@ -78,9 +80,41 @@ def read_status() -> dict:
   """Dernier releve. N'importe rien de lourd : appele depuis le process UI."""
   try:
     with open(STATUS_PATH) as f:
-      return json.load(f)
+      return _with_corrected_time(json.load(f))
   except (OSError, ValueError):
     return {}
+
+
+def _boot_id() -> str:
+  try:
+    with open("/proc/sys/kernel/random/boot_id") as f:
+      return f.read().strip()
+  except OSError:
+    return ""
+
+
+def _with_corrected_time(status: dict) -> dict:
+  """Recale l'horodatage du releve.
+
+  Au demarrage, le comma n'a ni GPS ni wifi : son horloge est encore a la date par
+  defaut d'AGNOS, et le releve est donc horodate n'importe quand. Le temps monotone,
+  lui, est juste. Tant qu'on est dans le meme demarrage, on retrouve l'heure reelle
+  du releve des que l'horloge est recalee. On reecrit alors le fichier, pour que les
+  demarrages suivants lisent la bonne heure.
+  """
+  mono, boot = status.get("mono"), status.get("boot_id")
+  if mono is None or not boot or boot != _boot_id():
+    return status
+
+  corrected = time.time() - (time.monotonic() - mono)
+  if abs(corrected - status.get("time", 0)) > 60:
+    status["time"] = corrected
+    try:
+      with open(STATUS_PATH, "w") as f:
+        json.dump(status, f)
+    except OSError:
+      pass
+  return status
 
 
 def request(action: str) -> None:
@@ -185,7 +219,9 @@ def _run(do_clear: bool) -> dict:
   from opendbc.car.uds import UdsClient
   from panda import Panda
 
-  status: dict = {"time": time.time(), "ok": False, "cleared": None, "error": None, "scc_restored": None}
+  # mono et boot_id : l'horloge n'est pas encore a l'heure ici, voir _with_corrected_time
+  status: dict = {"time": time.time(), "mono": time.monotonic(), "boot_id": _boot_id(),
+                  "ok": False, "cleared": None, "error": None, "scc_restored": None}
   p = None
   try:
     p = Panda()

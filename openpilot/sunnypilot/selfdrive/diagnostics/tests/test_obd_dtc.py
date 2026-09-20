@@ -1,5 +1,7 @@
 """Trames de diagnostic envoyees par obd_dtc, verifiees sans la voiture."""
+import json
 import sys
+import time
 import types
 
 import pytest
@@ -116,10 +118,11 @@ class FakePandaDevice(FakePanda):
 
 
 @pytest.fixture
-def fake_panda(monkeypatch):
+def fake_panda(monkeypatch, tmp_path):
   device = FakePandaDevice(set(obd_dtc.OTHER_ECUS) | {obd_dtc.ENGINE_ECU}, dtcs={obd_dtc.SCC_ECU: [(0x56, 0x38)]})
   monkeypatch.setitem(sys.modules, "panda", types.SimpleNamespace(Panda=lambda: device))
   monkeypatch.setattr(obd_dtc.time, "sleep", lambda _: None)
+  monkeypatch.setattr(obd_dtc, "LOG_PATH", str(tmp_path / "dtc_log.txt"))
   return device
 
 
@@ -148,6 +151,46 @@ class TestRun:
     obd_dtc._run(do_clear=False)
 
     assert fake_panda.calls[-3:] == ["obd=False", "safety=0", "close"]  # 0 = silent
+
+
+class TestStatusTime:
+  """Au demarrage l'horloge du comma est encore a la date par defaut d'AGNOS."""
+
+  def _write(self, monkeypatch, tmp_path, status):
+    path = tmp_path / "dtc_status.json"
+    path.write_text(json.dumps(status))
+    monkeypatch.setattr(obd_dtc, "STATUS_PATH", str(path))
+    return path
+
+  def test_same_boot_recovers_the_real_time(self, monkeypatch, tmp_path):
+    path = self._write(monkeypatch, tmp_path, {"time": 1_700_000_000.0, "mono": time.monotonic() - 10,
+                                               "boot_id": obd_dtc._boot_id(), "ok": True})
+    status = obd_dtc.read_status()
+
+    assert abs(status["time"] - (time.time() - 10)) < 2
+    # corrige aussi dans le fichier, pour les demarrages suivants
+    assert json.loads(path.read_text())["time"] == status["time"]
+
+  def test_a_clock_already_right_is_left_alone(self, monkeypatch, tmp_path):
+    stamp = time.time() - 30
+    self._write(monkeypatch, tmp_path, {"time": stamp, "mono": time.monotonic() - 30,
+                                        "boot_id": obd_dtc._boot_id(), "ok": True})
+    assert obd_dtc.read_status()["time"] == stamp
+
+  def test_another_boot_is_left_alone(self, monkeypatch, tmp_path):
+    self._write(monkeypatch, tmp_path, {"time": 1_700_000_000.0, "mono": 42.0,
+                                        "boot_id": "un-autre-demarrage", "ok": True})
+    assert obd_dtc.read_status()["time"] == 1_700_000_000.0
+
+  def test_status_without_monotonic_is_left_alone(self, monkeypatch, tmp_path):
+    self._write(monkeypatch, tmp_path, {"time": 1_700_000_000.0, "ok": True})
+    assert obd_dtc.read_status()["time"] == 1_700_000_000.0
+
+  def test_a_run_records_what_the_correction_needs(self, fake_panda):
+    status = obd_dtc._run(do_clear=False)
+
+    assert status["boot_id"] == obd_dtc._boot_id()
+    assert abs(status["mono"] - time.monotonic()) < 5
 
 
 class TestReadOthers:
