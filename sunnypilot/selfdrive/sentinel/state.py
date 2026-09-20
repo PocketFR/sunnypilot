@@ -16,6 +16,7 @@ import json
 import os
 
 ARMED_PATH = "/data/sentry_armed"
+RUNNING_PATH = "/data/sentry_running"
 MIN_VOLTAGE_PATH = "/data/sentry_min_voltage"
 STATUS_PATH = "/data/sentry_status.json"
 
@@ -69,3 +70,24 @@ def write_status(status: dict) -> None:
     os.replace(tmp, STATUS_PATH)
   except OSError:
     pass
+
+
+def mark_running() -> None:
+  """Pose pendant la veille, retire a l'arret volontaire : s'il est encore la au
+  demarrage suivant, c'est que la veille s'est arretee net, courant coupe."""
+  try:
+    with open(RUNNING_PATH, "w") as f:
+      f.write("1")
+  except OSError:
+    pass
+
+
+def clear_running() -> None:
+  try:
+    os.unlink(RUNNING_PATH)
+  except OSError:
+    pass
+
+
+def was_running() -> bool:
+  return os.path.exists(RUNNING_PATH)
