@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -58,6 +59,11 @@ ODO_OFFSET = 6
 SCAN_TIMEOUT = 30.
 HANDOVER_DELAY = 1.0
 LETTERS = "PCBU"
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+# "2026-03-24 14:46:14 (t+31s 3f2a1c9d) message"
+LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \(t\+(\d+)s ([0-9a-f]{8})\) (.*)$")
+# au-dela de cet ecart, l'horodatage vient d'une horloge pas encore recalee
+TIME_SLACK = 60.
 
 
 def dtc_str(b0: int, b1: int) -> str:
@@ -65,11 +71,12 @@ def dtc_str(b0: int, b1: int) -> str:
 
 
 def _log(msg: str) -> None:
-  """Horodate aussi en secondes depuis le demarrage : au boot l'horloge murale est
-  encore a la date par defaut d'AGNOS, le temps monotone permet de s'y retrouver."""
+  """Horodate aussi en secondes depuis le demarrage et par debut d'identifiant de
+  demarrage : au boot l'horloge murale est encore a la date par defaut d'AGNOS, et
+  ces deux repères permettent de recaler la ligne apres coup (voir _fix_log_times)."""
   try:
     with open(LOG_PATH, "a") as f:
-      f.write("%s (t+%ds) %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), time.monotonic(), msg))
+      f.write("%s (t+%ds %s) %s\n" % (time.strftime(TIME_FORMAT), time.monotonic(), _boot_id()[:8], msg))
   except OSError:
     pass
 
@@ -78,11 +85,27 @@ def _log(msg: str) -> None:
 
 def read_status() -> dict:
   """Dernier releve. N'importe rien de lourd : appele depuis le process UI."""
+  _fix_log_times()
   try:
     with open(STATUS_PATH) as f:
       return _with_corrected_time(json.load(f))
   except (OSError, ValueError):
     return {}
+
+
+def _clock_is_set() -> bool:
+  """openpilot sait dire si l'horloge a ete recalee : au boot elle vaut la date de
+  compilation de systemd, celle de l'image AGNOS (common/time_helpers.py)."""
+  try:
+    from openpilot.common.time_helpers import system_time_valid
+    return system_time_valid()
+  except Exception:
+    return False
+
+
+def _real_time(mono: float) -> float:
+  """Heure reelle d'un evenement du demarrage courant, d'apres son temps monotone."""
+  return time.time() - (time.monotonic() - mono)
 
 
 def _boot_id() -> str:
@@ -103,11 +126,11 @@ def _with_corrected_time(status: dict) -> dict:
   demarrages suivants lisent la bonne heure.
   """
   mono, boot = status.get("mono"), status.get("boot_id")
-  if mono is None or not boot or boot != _boot_id():
+  if mono is None or not boot or boot != _boot_id() or not _clock_is_set():
     return status
 
-  corrected = time.time() - (time.monotonic() - mono)
-  if abs(corrected - status.get("time", 0)) > 60:
+  corrected = _real_time(mono)
+  if abs(corrected - status.get("time", 0)) > TIME_SLACK:
     status["time"] = corrected
     try:
       with open(STATUS_PATH, "w") as f:
@@ -115,6 +138,57 @@ def _with_corrected_time(status: dict) -> dict:
     except OSError:
       pass
   return status
+
+
+def _fix_log_times() -> None:
+  """Recale les lignes du journal ecrites avant que l'horloge ne soit a l'heure.
+
+  Meme principe que pour le releve, mais ligne par ligne : chaque ligne porte ses
+  secondes depuis le demarrage et le debut de l'identifiant de demarrage. Seules les
+  lignes du demarrage courant sont recalees, les autres ne sont plus rattrapables et
+  restent telles quelles, comme les lignes ecrites avant ce format.
+  """
+  if not _clock_is_set():
+    return
+
+  boot = _boot_id()[:8]
+  try:
+    with open(LOG_PATH) as f:
+      lines = f.readlines()
+  except OSError:
+    return
+
+  fixed, changed = [], False
+  for line in lines:
+    m = LOG_LINE.match(line.rstrip("\n"))
+    if m is None or m.group(3) != boot:
+      fixed.append(line)
+      continue
+
+    stamp, mono, rest = m.group(1), float(m.group(2)), m.group(4)
+    real = _real_time(mono)
+    try:
+      written = time.mktime(time.strptime(stamp, TIME_FORMAT))
+    except ValueError:
+      fixed.append(line)
+      continue
+
+    if abs(real - written) <= TIME_SLACK:
+      fixed.append(line)
+      continue
+
+    fixed.append("%s (t+%ds %s) %s\n" % (time.strftime(TIME_FORMAT, time.localtime(real)), mono, boot, rest))
+    changed = True
+
+  if not changed:
+    return
+  try:
+    tmp = LOG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+      f.writelines(fixed)
+    os.replace(tmp, LOG_PATH)
+  except OSError:
+    pass
 
 
 def request(action: str) -> None:
@@ -131,6 +205,10 @@ def request(action: str) -> None:
 def scan_at_boot(timeout: float = SCAN_TIMEOUT) -> None:
   """Lance la lecture dans un sous-processus. Ne leve jamais, ne bloque jamais
   plus de `timeout` : le demarrage d'openpilot ne doit pas dependre de ca."""
+  # Un bouton du panneau relance openpilot sans redemarrer le systeme : l'horloge est
+  # alors a l'heure et on peut recaler les lignes du scan precedent.
+  _fix_log_times()
+
   if os.path.exists(DISABLE_PATH):
     return
   try:
