@@ -15,6 +15,7 @@ from openpilot.common.text_window import TextWindow
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.system.manager.helpers import unblock_stdout, save_bootlog
 from openpilot.system.manager.process import ensure_running
+from openpilot.sunnypilot.selfdrive.sentinel import state as sentinel_state
 from openpilot.sunnypilot.selfdrive.diagnostics import obd_dtc
 from openpilot.system.manager.process_config import managed_processes
 from openpilot.system.athena.registration import register, UNREGISTERED_DONGLE_ID
@@ -153,6 +154,14 @@ def manager_thread() -> None:
     ignition = any(ps.ignitionLine or ps.ignitionCan for ps in sm['pandaStates'] if ps.pandaType != log.PandaState.PandaType.unknown)
     if ignition and not ignition_prev:
       params.clear_all(ParamKeyFlag.CLEAR_ON_IGNITION_ON)
+
+    # Mode sentinelle : demarrer le moteur en est la seule sortie, et tient lieu
+    # d'authentification. Le desarmement doit se faire ici : la porte de sentineld se
+    # ferme des le passage en route et le manager le tue avant qu'il ait pu le faire
+    # lui-meme, si bien que la sentinelle restait armee apres un trajet entier.
+    if ignition and sentinel_state.is_armed():
+      sentinel_state.disarm()
+      cloudlog.info("sentry mode disarmed by ignition")
 
     # update offroad state for services that don't subscribe to deviceState
     if started != started_prev:
