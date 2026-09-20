@@ -404,3 +404,44 @@ class TestState:
 
   def test_a_missing_status_reads_empty(self):
     assert state.read_status() == {}
+
+
+class TestBootEvent:
+  """Debrancher le comma est la premiere chose a faire pour le faire taire."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "ARMED_PATH", str(tmp_path / "sentry_armed"))
+    monkeypatch.setattr(state, "RUNNING_PATH", str(tmp_path / "sentry_running"))
+    monkeypatch.setattr(state, "MIN_VOLTAGE_PATH", str(tmp_path / "sentry_min_voltage"))
+    state.arm()
+    self.root = str(tmp_path / "events")
+
+  def test_the_watch_records_as_soon_as_it_starts(self):
+    s = sentineld.Sentry(self.root)
+    s.on_boot(0., power_cut=True)
+
+    assert s.recorder.recording and s.recorder.triggers == ["boot"]
+
+  def test_a_power_cut_is_told_apart_from_a_normal_start(self):
+    s = sentineld.Sentry(self.root)
+    s.on_boot(0., power_cut=True)
+    meta = json.loads(open(os.path.join(s.recorder.path, "meta.json")).read())
+
+    assert meta["power_cut"] is True and meta["triggers"] == ["boot"]
+
+  def test_the_marker_survives_a_watch_that_was_cut_off(self):
+    assert state.was_running() is False
+    state.mark_running()
+    assert state.was_running() is True        # coupure : le marqueur reste
+
+  def test_a_deliberate_stop_leaves_no_marker(self):
+    state.mark_running()
+    state.clear_running()
+
+    assert state.was_running() is False
+
+  def test_clearing_twice_is_harmless(self):
+    state.clear_running()
+    state.clear_running()
+    assert state.was_running() is False
