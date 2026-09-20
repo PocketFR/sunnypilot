@@ -46,6 +46,15 @@ MIN_FREE_PERCENT = 10.    # on n'ecrit plus en dessous, les trajets passent avan
 LOW_VOLTAGE_S = 60.       # duree sous le seuil avant de s'arreter
 JPEG_QUALITY = 80
 
+# Releve de consommation : l'appareil mesure lui-meme la puissance tiree de la voiture
+# (/sys/class/hwmon/hwmon1/power1_input). Une ligne toutes les 30 s suffit a tracer une
+# nuit, et permet de dimensionner une batterie auxiliaire sur des chiffres.
+TRACE_PATH = "/data/sentry_power.csv"
+TRACE_INTERVAL = 30.
+TRACE_MAX_BYTES = 512 * 1024
+TRACE_KEEP_LINES = 2000
+TRACE_HEADER = "time,mono,boot,voltage_mv,power_w,som_w,recording,events\n"
+
 # Mouvement : ecart d'intensite par cellule, et part des cellules qui doivent bouger
 MOTION_STEP = 16
 MOTION_DELTA = 12
@@ -206,6 +215,37 @@ class EventRecorder:
     return path
 
 
+def append_trace(row: dict, path: str = TRACE_PATH) -> None:
+  """Ajoute une ligne au releve, et borne le fichier comme le journal du diagnostic.
+
+  L'heure murale est fausse au reveil, d'ou mono et boot : l'analyse recale ensuite
+  (voir sunnypilot/selfdrive/common/boot_time.py).
+  """
+  try:
+    new_file = not os.path.exists(path)
+    with open(path, "a") as f:
+      if new_file:
+        f.write(TRACE_HEADER)
+      f.write("%.0f,%.1f,%s,%d,%.2f,%.2f,%d,%d\n" % (
+        row["time"], row["mono"], row["boot"], row["voltage_mv"],
+        row["power_w"], row["som_w"], row["recording"], row["events"]))
+  except OSError:
+    return
+
+  try:
+    if os.path.getsize(path) <= TRACE_MAX_BYTES:
+      return
+    with open(path) as f:
+      lines = f.readlines()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+      f.write(TRACE_HEADER)
+      f.writelines(lines[-TRACE_KEEP_LINES:])
+    os.replace(tmp, path)
+  except OSError:
+    pass
+
+
 def read_json(path: str) -> dict:
   try:
     with open(path) as f:
@@ -319,6 +359,8 @@ class Sentry:
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.
+    self.power_w = 0.
+    self.som_w = 0.
     self.last_frame = 0.
     self.stop_reason: str | None = None
     self.disk_full = False
@@ -364,8 +406,15 @@ class Sentry:
     self.recorder.tick(now)
     self.last_frame = now
 
+  def trace_row(self) -> dict:
+    """Une ligne de releve : ce que la voiture fournit, ce que l'appareil consomme."""
+    return {"time": time.time(), "mono": time.monotonic(), "boot": boot_id()[:8],
+            "voltage_mv": self.voltage_mv, "power_w": self.power_w, "som_w": self.som_w,
+            "recording": int(self.recorder.recording), "events": len(event_dirs(self.root))}
+
   def status(self) -> dict:
     return {"armed": self.armed(), "recording": self.recorder.recording,
+            "power_w": self.power_w, "som_w": self.som_w,
             "triggers": list(self.recorder.triggers), "voltage_mv": self.voltage_mv,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
@@ -389,6 +438,14 @@ def main() -> None:
   except Exception:
     pass
 
+  def read_power() -> tuple[float, float]:
+    """Puissance tiree de la voiture, et part du seul calculateur : la difference
+    donne le cout des cameras, qui est ce qui pese dans la veille."""
+    try:
+      return HARDWARE.get_current_power_draw() or 0., HARDWARE.get_som_power_draw() or 0.
+    except Exception:
+      return 0., 0.
+
   sentry = Sentry()
   # marqueur laisse en place par la veille precedente = elle ne s'est pas arretee d'elle-meme
   power_cut = state.was_running()
@@ -400,7 +457,7 @@ def main() -> None:
              for cam, stream in CAMERAS.items()}
 
   recalibrated = False
-  last_status = last_prune = 0.
+  last_status = last_prune = last_trace = 0.
   rk = Ratekeeper(2.0, print_delay_threshold=None)
 
   while True:
@@ -433,6 +490,11 @@ def main() -> None:
       last_prune = now
       if not recalibrated:
         recalibrated = bool(recalibrate_events(sentry.root)) or clock_is_set()
+
+    if now - last_trace > TRACE_INTERVAL:
+      sentry.power_w, sentry.som_w = read_power()
+      append_trace(sentry.trace_row())
+      last_trace = now
 
     if now - last_status > 5.:
       write_status(sentry.status())
