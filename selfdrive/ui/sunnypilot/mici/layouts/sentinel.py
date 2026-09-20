@@ -79,9 +79,10 @@ class SentinelLayoutMici(NavScroller):
     return not self._armed() and not ui_state.started and not ui_state.engaged
 
   def _arm(self) -> None:
+    # Pas de redemarrage : le manager reevalue les portes a chaque tour de boucle, donc
+    # camerad et sentineld demarrent en une seconde, comme le fait l'armement automatique.
     state.arm()
-    ui_state.params.put_bool("DoReboot", True)
 
   def _arm_prompt(self) -> None:
-    gui_app.push_widget(BigConfirmationDialog(tr("slide to arm sentry and reboot"), self._icon,
+    gui_app.push_widget(BigConfirmationDialog(tr("slide to arm sentry"), self._icon,
                                               confirm_callback=self._arm))
