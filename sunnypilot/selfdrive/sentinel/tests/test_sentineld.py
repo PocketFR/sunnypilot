@@ -167,6 +167,17 @@ class TestEventRecorder:
     assert self.rec.triggers == ["motion", "can"]
 
 
+class TestProcessConfig:
+  """La sentinelle doit revenir d'elle-meme : personne ne regarde l'ecran la nuit."""
+
+  def test_the_watch_is_restarted_if_it_crashes(self):
+    pytest.importorskip("capnp")   # process_config passe par cereal
+    from openpilot.system.manager.process_config import procs
+
+    watch = [p for p in procs if p.name == "sentineld"]
+    assert watch and watch[0].restart_if_crash
+
+
 class TestDayFolders:
   """Les evenements sont ranges par jour : <racine>/<AAAAMMJJ>/<AAAAMMJJ_HHMMSS>."""
 
