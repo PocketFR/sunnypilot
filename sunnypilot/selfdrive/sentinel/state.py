@@ -22,6 +22,7 @@ MIN_VOLTAGE_PATH = "/data/sentry_min_voltage"
 MOTION_DELTA_PATH = "/data/sentry_motion_delta"
 MOTION_AREA_PATH = "/data/sentry_motion_area"
 MOTION_HOLD_PATH = "/data/sentry_motion_hold"
+MAX_GB_PATH = "/data/sentry_max_gb"
 STATUS_PATH = "/data/sentry_status.json"
 
 # Seuil d'arret par defaut, en millivolts : la valeur openpilot VBATT_PAUSE_CHARGING.
@@ -50,6 +51,12 @@ DEFAULT_MOTION_HOLD = 3
 # A 1,2 % sur deux images elle voit l'arrivee a la vitre, pour deux fausses alertes sur les
 # 55 evenements de vent de cette matinee. Les deux autres cameras gardent le seuil commun.
 CAMERA_MOTION = {"d": (0.012, 2)}
+
+# Place reservee aux evenements. Mesure du 21/09/2026 : 106 evenements pesent 1,6 Go, soit
+# ~15 Mo piece. Le disque fait 94,5 Go, dont 70 Go de trajets ; ce que la sentinelle prend
+# en plus, le nettoyeur des trajets le reprend sur les segments les plus anciens, qui sont
+# deja sur le NAS.
+DEFAULT_MAX_GB = 3.0
 
 
 def is_armed() -> bool:
@@ -160,6 +167,11 @@ def _read_number(path: str, default, cast):
 def motion_delta() -> int:
   """Reglable a chaud : echo 20 > /data/sentry_motion_delta"""
   return _read_number(MOTION_DELTA_PATH, DEFAULT_MOTION_DELTA, int)
+
+
+def max_bytes() -> int:
+  """Reglable a chaud : echo 4 > /data/sentry_max_gb"""
+  return int(_read_number(MAX_GB_PATH, DEFAULT_MAX_GB, float) * 1024 ** 3)
 
 
 def _read_camera_number(path: str, cam: str | None, default, cast):
