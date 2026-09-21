@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import time
@@ -32,6 +33,12 @@ from openpilot.sunnypilot.selfdrive.sentinel import state
 from openpilot.sunnypilot.selfdrive.sentinel.state import write_status
 
 SENTRY_DIR = "/data/media/0/sentry"
+# Les evenements sont ranges par jour : <SENTRY_DIR>/<AAAAMMJJ>/<AAAAMMJJ_HHMMSS>. Sur
+# plusieurs nuits de veille la liste plate devenait illisible, dans le lecteur comme sur
+# le NAS. Les evenements plats d'avant ce classement restent lus (voir event_dirs).
+DAY_FORMAT = "%Y%m%d"
+EVENT_FORMAT = "%Y%m%d_%H%M%S"
+DAY_RE = re.compile(r"\d{8}$")
 
 # Cameras : prefixe de fichier -> nom du flux VisionIPC
 CAMERAS = {"f": "VISION_STREAM_ROAD", "e": "VISION_STREAM_WIDE_ROAD", "d": "VISION_STREAM_DRIVER"}
@@ -207,11 +214,10 @@ class EventRecorder:
       self.close()
 
   def _open(self, now: float) -> None:
-    os.makedirs(self.root, exist_ok=True)
-    self.path = os.path.join(self.root, time.strftime("%Y%m%d_%H%M%S", time.localtime()))
-    os.makedirs(self.path, exist_ok=True)
-    self.index, self.frames = 0, 0
     self.started_at, self.started_mono = time.time(), time.monotonic()
+    self.path = event_path(self.root, self.started_at)
+    os.makedirs(self.path, exist_ok=True)  # cree aussi le dossier du jour
+    self.index, self.frames = 0, 0
     self._write_meta(self._meta())
 
     # la pre-memoire part en indices negatifs : ce qui precede l'evenement
@@ -288,13 +294,52 @@ def read_json(path: str) -> dict:
     return {}
 
 
+def event_path(root: str, when: float) -> str:
+  """Chemin d'un evenement : <root>/<AAAAMMJJ>/<AAAAMMJJ_HHMMSS>."""
+  stamp = time.localtime(when)
+  return os.path.join(root, time.strftime(DAY_FORMAT, stamp), time.strftime(EVENT_FORMAT, stamp))
+
+
 def event_dirs(root: str = SENTRY_DIR) -> list[str]:
+  """Les evenements, du plus ancien au plus recent.
+
+  Un dossier dont le nom est une date seule (AAAAMMJJ) est un dossier de jour : ses enfants
+  sont les evenements. Les autres sont des evenements ranges a plat, d'avant ce classement.
+  """
   try:
-    entries = [os.path.join(root, d) for d in os.listdir(root)]
+    entries = sorted(os.listdir(root))
   except OSError:
     return []
-  dirs = [d for d in entries if os.path.isdir(d)]
+
+  dirs = []
+  for name in entries:
+    path = os.path.join(root, name)
+    if not os.path.isdir(path):
+      continue
+    if DAY_RE.fullmatch(name):
+      try:
+        dirs += [os.path.join(path, d) for d in sorted(os.listdir(path))
+                 if os.path.isdir(os.path.join(path, d))]
+      except OSError:
+        continue
+    else:
+      dirs.append(path)
   return sorted(dirs, key=lambda d: os.path.getmtime(d))
+
+
+def prune_empty_days(root: str = SENTRY_DIR) -> None:
+  """Retire les dossiers de jour restes vides apres une purge ou un recalage."""
+  try:
+    entries = sorted(os.listdir(root))
+  except OSError:
+    return
+  for name in entries:
+    path = os.path.join(root, name)
+    if DAY_RE.fullmatch(name) and os.path.isdir(path):
+      try:
+        os.rmdir(path)  # echoue si le dossier n'est pas vide, c'est voulu
+      except OSError:
+        pass
 
 
 def prune(root: str = SENTRY_DIR, max_bytes: int = MAX_BYTES, keep: str | None = None) -> list[str]:
@@ -315,6 +360,8 @@ def prune(root: str = SENTRY_DIR, max_bytes: int = MAX_BYTES, keep: str | None =
       continue
     total -= sizes[d]
     removed.append(d)
+  if removed:
+    prune_empty_days(root)
   return removed
 
 
@@ -340,10 +387,11 @@ def recalibrate_events(root: str = SENTRY_DIR) -> list[tuple[str, str]]:
     if abs(corrected - meta.get("time", 0)) <= TIME_SLACK:
       continue
 
-    target = os.path.join(root, time.strftime("%Y%m%d_%H%M%S", time.localtime(corrected)))
+    target = event_path(root, corrected)
     if os.path.exists(target):
       continue
     try:
+      os.makedirs(os.path.dirname(target), exist_ok=True)
       os.rename(path, target)
       os.utime(target, (corrected, corrected))  # l'ordre de purge suit la date des dossiers
     except OSError:
@@ -355,6 +403,8 @@ def recalibrate_events(root: str = SENTRY_DIR) -> list[tuple[str, str]]:
     except OSError:
       pass
     renamed.append((path, target))
+  if renamed:
+    prune_empty_days(root)  # le jour d'origine peut s'etre vide
   return renamed
 
 

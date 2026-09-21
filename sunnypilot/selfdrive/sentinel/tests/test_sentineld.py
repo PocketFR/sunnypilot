@@ -125,6 +125,71 @@ class TestEventRecorder:
     assert self.rec.triggers == ["motion", "can"]
 
 
+class TestDayFolders:
+  """Les evenements sont ranges par jour : <racine>/<AAAAMMJJ>/<AAAAMMJJ_HHMMSS>."""
+
+  def test_an_event_lands_in_its_day_folder(self, tmp_path):
+    root = str(tmp_path / "sentry")
+    rec = sentineld.EventRecorder(root, pre_roll=1, post_event_s=5.)
+    rec.trigger("motion", time.monotonic())
+
+    day, event = os.path.split(rec.path)
+    assert os.path.basename(day) == event[:8]
+    assert os.path.dirname(day) == root
+
+  def test_events_are_found_inside_the_day_folders(self, tmp_path):
+    root = str(tmp_path)
+    os.makedirs(os.path.join(root, "20260920", "20260920_235900"))
+    os.makedirs(os.path.join(root, "20260921", "20260921_000100"))
+
+    found = [os.path.basename(d) for d in sentineld.event_dirs(root)]
+    assert sorted(found) == ["20260920_235900", "20260921_000100"]
+
+  def test_the_flat_events_from_before_are_still_seen(self, tmp_path):
+    """Pendant la bascule, les deux rangements coexistent."""
+    root = str(tmp_path)
+    os.makedirs(os.path.join(root, "20260921", "20260921_000100"))
+    os.makedirs(os.path.join(root, "20260324_144614"))
+
+    found = [os.path.basename(d) for d in sentineld.event_dirs(root)]
+    assert sorted(found) == ["20260324_144614", "20260921_000100"]
+
+  def test_a_day_left_empty_by_the_purge_is_removed(self, tmp_path):
+    root = str(tmp_path)
+    old = os.path.join(root, "20260101", "20260101_000000")
+    os.makedirs(old)
+    with open(os.path.join(old, "f_000.jpg"), "wb") as f:
+      f.write(b"x" * 1000)
+    os.utime(old, (1000, 1000))
+    recent = os.path.join(root, "20260102", "20260102_000000")
+    os.makedirs(recent)
+    with open(os.path.join(recent, "f_000.jpg"), "wb") as f:
+      f.write(b"x" * 1000)
+    os.utime(recent, (2000, 2000))
+
+    removed = sentineld.prune(root, max_bytes=1500)
+
+    assert removed == [old]
+    assert not os.path.exists(os.path.join(root, "20260101"))   # le jour vide s'en va
+    assert os.path.exists(recent)                                # celui qui sert reste
+
+  def test_a_recalibrated_event_moves_to_the_right_day(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(sentineld, "clock_is_set", lambda: True)
+    root = str(tmp_path)
+    path = os.path.join(root, "20260324", "20260324_144614")
+    os.makedirs(path)
+    with open(os.path.join(path, "meta.json"), "w") as f:
+      json.dump({"time": 1_774_359_974.0, "mono": time.monotonic() - 30, "boot_id": sentineld.boot_id()}, f)
+
+    renamed = sentineld.recalibrate_events(root)
+
+    assert len(renamed) == 1
+    target = renamed[0][1]
+    assert os.path.basename(os.path.dirname(target)) == os.path.basename(target)[:8]
+    assert os.path.basename(os.path.dirname(target)) == time.strftime("%Y%m%d")
+    assert not os.path.exists(os.path.join(root, "20260324"))   # le jour d'origine est vide
+
+
 class TestPrune:
   def _event(self, root, name, size, mtime):
     path = os.path.join(root, name)
