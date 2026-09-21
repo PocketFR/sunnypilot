@@ -167,6 +167,50 @@ class TestEventRecorder:
     assert self.rec.triggers == ["motion", "can"]
 
 
+class TestPerCameraSettings:
+  """La cabine voit l'exterieur par un coin de son champ : elle a son propre seuil."""
+
+  @pytest.fixture(autouse=True)
+  def _files(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "MOTION_AREA_PATH", str(tmp_path / "area"))
+    monkeypatch.setattr(state, "MOTION_HOLD_PATH", str(tmp_path / "hold"))
+    self.tmp = tmp_path
+
+  def test_the_cabin_is_more_sensitive_than_the_others(self):
+    cabin = sentineld.MotionDetector("d")
+    road = sentineld.MotionDetector("f")
+
+    assert cabin.area < road.area and cabin.hold < road.hold
+    assert (road.area, road.hold) == (state.DEFAULT_MOTION_AREA, state.DEFAULT_MOTION_HOLD)
+
+  def test_a_file_for_one_camera_only_moves_that_one(self):
+    (self.tmp / "area_d").write_text("0.05")
+
+    assert sentineld.MotionDetector("d").area == 0.05
+    assert sentineld.MotionDetector("f").area == state.DEFAULT_MOTION_AREA
+
+  def test_the_common_file_still_covers_every_camera(self):
+    """Le reglage sans suffixe sert a tout baisser d'un coup, pour une mesure."""
+    (self.tmp / "area").write_text("0.002")
+    (self.tmp / "hold").write_text("1")
+
+    for cam in "fed":
+      assert sentineld.MotionDetector(cam).area == 0.002
+      assert sentineld.MotionDetector(cam).hold == 1
+
+  def test_the_camera_file_wins_over_the_common_one(self):
+    (self.tmp / "area").write_text("0.002")
+    (self.tmp / "area_d").write_text("0.012")
+
+    assert sentineld.MotionDetector("d").area == 0.012
+    assert sentineld.MotionDetector("f").area == 0.002
+
+  def test_each_camera_gets_its_own_detector(self, tmp_path, armed):
+    s = sentineld.Sentry(str(tmp_path / "ev"))
+
+    assert s.motion["d"].area != s.motion["f"].area
+
+
 class TestProcessConfig:
   """La sentinelle doit revenir d'elle-meme : personne ne regarde l'ecran la nuit."""
 
