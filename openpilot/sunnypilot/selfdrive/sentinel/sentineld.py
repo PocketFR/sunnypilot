@@ -78,12 +78,18 @@ class MotionDetector:
   - seules les cellules formant un carre de 2x2 sont comptees, car le vent dans les arbres
     fait du grain disperse la ou une personne fait une tache. Mesure sur des evenements
     reels : ce filtre fait passer le rapport entre les deux de 5 a 33.
+
+  Un troisieme filtre porte sur la duree, dans update() : devant une haie en plein vent,
+  l'amplitude seule ne suffit plus (voir state.py).
   """
 
-  def __init__(self, step: int = MOTION_STEP, delta: int | None = None, area: float | None = None):
+  def __init__(self, step: int = MOTION_STEP, delta: int | None = None, area: float | None = None,
+               hold: int | None = None):
     self.step = step
     self.delta = state.motion_delta() if delta is None else delta
     self.area = state.motion_area() if area is None else area
+    self.hold = state.motion_hold() if hold is None else hold
+    self.streak = 0
     self.previous: np.ndarray | None = None
 
   def score(self, y: np.ndarray) -> float:
@@ -101,7 +107,14 @@ class MotionDetector:
     return float(grouped.mean())
 
   def update(self, y: np.ndarray) -> bool:
-    return self.score(y) > self.area
+    """Vrai quand le mouvement se confirme sur assez d'images d'affilee.
+
+    Une rafale fait des pointes isolees, une personne reste dans le champ. La pre-memoire
+    garde les images precedant le declenchement, donc ces secondes d'attente sont
+    enregistrees quand meme : on retarde l'ouverture, on ne perd pas la scene.
+    """
+    self.streak = self.streak + 1 if self.score(y) > self.area else 0
+    return self.streak >= self.hold
 
 
 def extract_y(buf) -> np.ndarray:
