@@ -125,7 +125,10 @@ procs = [
   PythonProcess("logmessaged", "system.logmessaged", always_run),
 
   NativeProcess("camerad", "system/camerad", ["./camerad"], or_(driverview, sentinel), enabled=not WEBCAM),
-  PythonProcess("sentineld", "sunnypilot.selfdrive.sentinel.sentineld", sentinel),
+  # restart_if_crash : une surveillance qui meurt en pleine nuit et ne revient pas ne
+  # surveille plus rien, et rien ne le signale. Le manager ne relance un processus mort
+  # que si on le lui demande (system/manager/process.py).
+  PythonProcess("sentineld", "sunnypilot.selfdrive.sentinel.sentineld", sentinel, restart_if_crash=True),
   PythonProcess("webcamerad", "tools.webcam.camerad", driverview, enabled=WEBCAM),
   PythonProcess("proclogd", "system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
   PythonProcess("journald", "system.journald", only_onroad, platform.system() != "Darwin"),
