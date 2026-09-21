@@ -21,18 +21,27 @@ AUTO_PATH = "/data/sentry_auto"
 MIN_VOLTAGE_PATH = "/data/sentry_min_voltage"
 MOTION_DELTA_PATH = "/data/sentry_motion_delta"
 MOTION_AREA_PATH = "/data/sentry_motion_area"
+MOTION_HOLD_PATH = "/data/sentry_motion_hold"
 STATUS_PATH = "/data/sentry_status.json"
 
 # Seuil d'arret par defaut, en millivolts : la valeur openpilot VBATT_PAUSE_CHARGING.
 # Hors contact la batterie ne se recharge pas, c'est la seule protection reelle.
 DEFAULT_MIN_VOLTAGE_MV = 11800
 
-# Mouvement : ecart d'intensite d'une cellule, et part des cellules qui doivent bouger.
+# Mouvement : ecart d'intensite d'une cellule, part des cellules qui doivent bouger, et
+# nombre d'images consecutives qui doivent la depasser.
+#
 # Mesure sur des evenements reels : une personne qui tourne autour de la voiture donne
-# 14,5 % de cellules en mouvement, le vent dans les arbres 0,44 % au pire. Le seuil a
-# 1 % laisse donc un facteur 2 d'un cote et 14 de l'autre.
+# 14,5 % de cellules en mouvement. Le vent dans les arbres donnait 0,44 % au pire par
+# temps calme, mais une matinee ensoleillee et ventee devant une haie qui remplit le
+# cadre monte a 12,4 % en pointe (608 images mesurees le 21/09/2026) : l'amplitude seule
+# ne separe plus rien. Ce qui les separe, c'est la duree. Sur ces memes images, aucune
+# rafale ne tient trois images d'affilee au-dessus de 3 %, alors qu'une personne y reste
+# plusieurs secondes. Un saut d'exposition automatique, qui ne dure qu'une image, tombe
+# par la meme regle.
 DEFAULT_MOTION_DELTA = 12
-DEFAULT_MOTION_AREA = 0.01
+DEFAULT_MOTION_AREA = 0.03
+DEFAULT_MOTION_HOLD = 3
 
 
 def is_armed() -> bool:
@@ -148,3 +157,8 @@ def motion_delta() -> int:
 def motion_area() -> float:
   """Reglable a chaud : echo 0.02 > /data/sentry_motion_area"""
   return _read_number(MOTION_AREA_PATH, DEFAULT_MOTION_AREA, float)
+
+
+def motion_hold() -> int:
+  """Images consecutives exigees. Reglable a chaud : echo 2 > /data/sentry_motion_hold"""
+  return max(1, _read_number(MOTION_HOLD_PATH, DEFAULT_MOTION_HOLD, int))

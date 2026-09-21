@@ -13,6 +13,19 @@ def frame(width=160, height=120, value=100):
   return np.full((height, width), value, dtype=np.uint8)
 
 
+def walking(step, width=160, height=120, box=(20, 100, 10, 58), stride=48):
+  """Une silhouette qui avance d'une image a l'autre : du mouvement qui dure.
+
+  Le pas doit depasser deux cellules du sous-echantillonnage, sinon le filtre 2x2 efface
+  le deplacement. Un piston marche a ~1,4 m/s : a une image par seconde, il traverse
+  bien plus que ca.
+  """
+  top, bottom, left, right = box
+  f = frame(width, height)
+  f[top:bottom, left + step * stride:right + step * stride] = 220
+  return f
+
+
 @pytest.fixture
 def armed(monkeypatch, tmp_path):
   """Arme la sentinelle : un fichier, pas un parametre (voir sentinel/state.py)."""
@@ -33,11 +46,40 @@ class TestMotionDetector:
     assert d.update(frame()) is False
 
   def test_something_moving_triggers(self):
+    """Une silhouette qui traverse : elle reste dans le champ, donc elle se confirme."""
     d = sentineld.MotionDetector()
     d.update(frame())
-    moved = frame()
-    moved[20:90, 20:110] = 220  # une silhouette qui traverse
-    assert d.update(moved) is True
+    fired = [d.update(walking(i)) for i in range(d.hold)]
+    assert fired[-1] is True
+
+  def test_a_single_burst_does_not_trigger(self):
+    """Une rafale de vent fait une pointe isolee : elle ne tient pas assez longtemps."""
+    d = sentineld.MotionDetector(hold=3)
+    d.update(frame())
+    assert d.update(walking(0)) is False       # une seule image en mouvement
+    assert d.update(frame()) is False          # la scene redevient fixe
+
+  def test_the_count_restarts_after_a_calm_frame(self):
+    """Une scene qui redevient immobile remet le compteur a zero.
+
+    L'immobilite, c'est deux images identiques : faire disparaitre la silhouette serait
+    encore du mouvement.
+    """
+    d = sentineld.MotionDetector(hold=3)
+    d.update(frame(320))
+    d.update(walking(0, 320))                  # le compteur part a 1
+    assert d.update(walking(0, 320)) is False  # image identique : retour a zero
+    assert d.update(walking(1, 320)) is False
+    assert d.update(walking(2, 320)) is False
+    assert d.update(walking(3, 320)) is True
+
+  def test_the_hold_can_be_lowered_without_touching_the_code(self, monkeypatch, tmp_path):
+    path = tmp_path / "hold"
+    path.write_text("1")
+    monkeypatch.setattr(state, "MOTION_HOLD_PATH", str(path))
+    d = sentineld.MotionDetector()
+    d.update(frame())
+    assert d.update(walking(0)) is True
 
   def test_a_global_brightness_change_does_not_trigger(self):
     """Un nuage qui passe, un lampadaire qui s'allume : toute l'image bouge d'un bloc."""
@@ -316,19 +358,26 @@ class TestSentryFrames:
   def _sentry(self, tmp_path):
     return sentineld.Sentry(str(tmp_path / "events"))
 
-  def _frames(self, still=True):
-    moving = frame()
-    moving[20:90, 20:110] = 220
+  def _frames(self, still=True, step=0):
     out = {}
     for cam in sentineld.CAMERAS:
-      y = frame() if still or cam == "d" else moving
+      y = frame() if still or cam == "d" else walking(step)
       out[cam] = (y, lambda: b"jpeg")
     return out
 
+  def _sustained(self, s, cams=None):
+    """Assez d'images consecutives pour confirmer le mouvement (voir MotionDetector)."""
+    hold = state.motion_hold()
+    s.on_frames(self._frames(still=True), 0.)      # premiere image : reference
+    for i in range(hold):
+      if cams is None:
+        s.on_frames(self._frames(still=False, step=i), float(i + 1))
+      else:
+        s.on_frames({c: (walking(i), lambda: b"jpeg") for c in cams}, float(i + 1))
+
   def test_movement_opens_an_event_with_the_three_cameras(self, tmp_path, armed):
     s = self._sentry(tmp_path)
-    s.on_frames(self._frames(still=True), 0.)      # premiere image : reference
-    s.on_frames(self._frames(still=False), 1.)
+    self._sustained(s)
 
     assert s.recorder.recording
     written = os.listdir(s.recorder.path)
@@ -337,10 +386,9 @@ class TestSentryFrames:
   def test_the_cabin_camera_triggers_too(self, tmp_path, armed):
     """Elle regarde par les vitres laterales : c'est elle qui voit venir sur les cotes."""
     s = self._sentry(tmp_path)
-    moving = frame()
-    moving[20:90, 20:110] = 220
     s.on_frames({"d": (frame(), lambda: b"jpeg")}, 0.)
-    s.on_frames({"d": (moving, lambda: b"jpeg")}, 1.)
+    for i in range(state.motion_hold()):
+      s.on_frames({"d": (walking(i), lambda: b"jpeg")}, float(i + 1))
 
     assert s.recorder.recording and s.recorder.triggers == ["motion"]
 
@@ -671,10 +719,9 @@ class TestMotionCamera:
 
   def test_the_sentry_reports_the_camera_that_saw_it(self, tmp_path):
     s = sentineld.Sentry(str(tmp_path / "ev"))
-    still, moving = frame(), frame()
-    moving[20:90, 20:110] = 220
-    s.on_frames({"e": (still, lambda: b"jpeg")}, 0.)
-    s.on_frames({"e": (moving, lambda: b"jpeg")}, 1.)
+    s.on_frames({"e": (frame(), lambda: b"jpeg")}, 0.)
+    for i in range(state.motion_hold()):
+      s.on_frames({"e": (walking(i), lambda: b"jpeg")}, float(i + 1))
 
     assert s.status()["motion_cameras"] == ["e"]
 
@@ -707,10 +754,10 @@ class TestMotionAgainstFoliage:
     d = sentineld.MotionDetector()
     base = frame(width=1344, height=760)
     d.update(base)
-    person = base.copy()
-    person[300:600, 400:700] = 220        # une silhouette proche
+    fired = [d.update(walking(i, 1344, 760, (300, 600, 400, 700), stride=150))
+             for i in range(d.hold)]
 
-    assert d.update(person) is True
+    assert fired[-1] is True
 
   def test_the_grouped_score_is_far_below_the_scattered_one(self):
     """C'est ce rapport qui separe le vent d'une personne : mesure 0,44 % contre 14,5 %."""
