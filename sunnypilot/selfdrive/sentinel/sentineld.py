@@ -81,14 +81,18 @@ class MotionDetector:
 
   Un troisieme filtre porte sur la duree, dans update() : devant une haie en plein vent,
   l'amplitude seule ne suffit plus (voir state.py).
+
+  Les deux reglages dependent de la camera : ce qu'une personne occupe du cadre n'a rien de
+  commun entre la camera avant et le fisheye de l'habitacle (voir CAMERA_MOTION).
   """
 
-  def __init__(self, step: int = MOTION_STEP, delta: int | None = None, area: float | None = None,
-               hold: int | None = None):
+  def __init__(self, cam: str | None = None, step: int = MOTION_STEP, delta: int | None = None,
+               area: float | None = None, hold: int | None = None):
+    self.cam = cam
     self.step = step
     self.delta = state.motion_delta() if delta is None else delta
-    self.area = state.motion_area() if area is None else area
-    self.hold = state.motion_hold() if hold is None else hold
+    self.area = state.motion_area(cam) if area is None else area
+    self.hold = state.motion_hold(cam) if hold is None else hold
     self.streak = 0
     self.previous: np.ndarray | None = None
 
@@ -452,7 +456,7 @@ class Sentry:
 
   def __init__(self, root: str = SENTRY_DIR):
     self.recorder = EventRecorder(root)
-    self.motion = {cam: MotionDetector() for cam in MOTION_CAMERAS}
+    self.motion = {cam: MotionDetector(cam) for cam in MOTION_CAMERAS}
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.

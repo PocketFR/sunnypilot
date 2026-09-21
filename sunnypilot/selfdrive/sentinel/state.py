@@ -43,6 +43,14 @@ DEFAULT_MOTION_DELTA = 12
 DEFAULT_MOTION_AREA = 0.03
 DEFAULT_MOTION_HOLD = 3
 
+# La camera cabine ne voit l'exterieur que par un coin de son champ : son fisheye est
+# rempli par l'habitacle. Mesure du 21/09/2026, quelqu'un debout a la vitre conducteur :
+# 3,4 % du cadre change, 1,6 % apres groupement, la ou la meme personne devant la voiture
+# donne 22 % et 11 % sur la camera avant. Au seuil commun elle ne declenche donc jamais.
+# A 1,2 % sur deux images elle voit l'arrivee a la vitre, pour deux fausses alertes sur les
+# 55 evenements de vent de cette matinee. Les deux autres cameras gardent le seuil commun.
+CAMERA_MOTION = {"d": (0.012, 2)}
+
 
 def is_armed() -> bool:
   return os.path.exists(ARMED_PATH)
@@ -154,11 +162,22 @@ def motion_delta() -> int:
   return _read_number(MOTION_DELTA_PATH, DEFAULT_MOTION_DELTA, int)
 
 
-def motion_area() -> float:
-  """Reglable a chaud : echo 0.02 > /data/sentry_motion_area"""
-  return _read_number(MOTION_AREA_PATH, DEFAULT_MOTION_AREA, float)
+def _read_camera_number(path: str, cam: str | None, default, cast):
+  """Le fichier propre a la camera l'emporte, puis le fichier commun, puis le defaut."""
+  if cam:
+    value = _read_number(f"{path}_{cam}", None, cast)
+    if value is not None:
+      return value
+  return _read_number(path, default, cast)
 
 
-def motion_hold() -> int:
-  """Images consecutives exigees. Reglable a chaud : echo 2 > /data/sentry_motion_hold"""
-  return max(1, _read_number(MOTION_HOLD_PATH, DEFAULT_MOTION_HOLD, int))
+def motion_area(cam: str | None = None) -> float:
+  """Reglable a chaud : echo 0.02 > /data/sentry_motion_area_d (ou sans suffixe pour toutes)"""
+  default = CAMERA_MOTION.get(cam, (DEFAULT_MOTION_AREA, DEFAULT_MOTION_HOLD))[0]
+  return _read_camera_number(MOTION_AREA_PATH, cam, default, float)
+
+
+def motion_hold(cam: str | None = None) -> int:
+  """Images consecutives exigees. Reglable a chaud : echo 2 > /data/sentry_motion_hold_d"""
+  default = CAMERA_MOTION.get(cam, (DEFAULT_MOTION_AREA, DEFAULT_MOTION_HOLD))[1]
+  return max(1, _read_camera_number(MOTION_HOLD_PATH, cam, default, int))
