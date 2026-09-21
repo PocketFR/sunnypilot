@@ -167,6 +167,51 @@ class TestEventRecorder:
     assert self.rec.triggers == ["motion", "can"]
 
 
+class TestDiskBudget:
+  """La place reservee aux evenements, et la limite ou l'on cede aux trajets."""
+
+  def test_the_quota_can_be_raised_without_touching_the_code(self, monkeypatch, tmp_path):
+    path = tmp_path / "max_gb"
+    path.write_text("4")
+    monkeypatch.setattr(state, "MAX_GB_PATH", str(path))
+
+    assert state.max_bytes() == 4 * 1024 ** 3
+
+  def test_a_broken_quota_falls_back_to_the_default(self, monkeypatch, tmp_path):
+    path = tmp_path / "max_gb"
+    path.write_text("beaucoup")
+    monkeypatch.setattr(state, "MAX_GB_PATH", str(path))
+
+    assert state.max_bytes() == int(state.DEFAULT_MAX_GB * 1024 ** 3)
+
+  def test_the_purge_follows_the_quota_of_the_moment(self, monkeypatch, tmp_path):
+    """Le quota est relu a chaque purge : le changer n'exige pas de redemarrer."""
+    root = str(tmp_path / "events")
+    for name, mtime in (("20260101_000000", 1000), ("20260102_000000", 2000)):
+      path = os.path.join(root, name[:8], name)
+      os.makedirs(path)
+      with open(os.path.join(path, "f_000.jpg"), "wb") as f:
+        f.write(b"x" * 1000)
+      os.utime(path, (mtime, mtime))
+
+    monkeypatch.setattr(state, "max_bytes", lambda: 10_000)
+    assert sentineld.prune(root) == []                     # large : on ne touche a rien
+    monkeypatch.setattr(state, "max_bytes", lambda: 1_500)
+    assert len(sentineld.prune(root)) == 1                 # etroit : le plus ancien part
+
+  def test_the_watch_gives_up_the_disk_before_the_drives_do(self):
+    """Les deux seuils ne doivent pas viser la meme ligne.
+
+    Le nettoyeur des trajets maintient le disque a son plancher en effacant des segments.
+    Si la sentinelle s'arretait au meme pourcentage, elle cesserait d'enregistrer en
+    permanence, sans que rien ne le signale.
+    """
+    pytest.importorskip("capnp")
+    from openpilot.system.loggerd.deleter import MIN_PERCENT
+
+    assert sentineld.MIN_FREE_PERCENT < MIN_PERCENT
+
+
 class TestPerCameraSettings:
   """La cabine voit l'exterieur par un coin de son champ : elle a son propre seuil."""
 

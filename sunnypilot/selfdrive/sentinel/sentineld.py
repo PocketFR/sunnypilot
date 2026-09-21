@@ -49,8 +49,13 @@ MOTION_CAMERAS = tuple(CAMERAS)
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
 PRE_ROLL = 10             # images gardees en memoire avant le declencheur
 POST_EVENT_S = 20.        # on continue a enregistrer apres le dernier declencheur
-MAX_BYTES = 2 * 1024 ** 3  # place reservee aux evenements
-MIN_FREE_PERCENT = 10.    # on n'ecrit plus en dessous, les trajets passent avant
+# Plancher de place libre. Il doit rester SOUS celui du nettoyeur de trajets
+# (system/loggerd/deleter.py : MIN_PERCENT = 10, MIN_BYTES = 5 Go), sinon les deux visent
+# la meme ligne : le nettoyeur maintient le disque a 10 % en effacant des trajets, et la
+# sentinelle, qui s'arrete au meme 10 %, cesse d'enregistrer sans que rien ne le signale.
+# Mesure du 21/09/2026 : disque a 10,13 %, soit 0,13 point au-dessus de l'arret. En
+# laissant deux points de marge, le nettoyeur libere la place avant que la veille ne cede.
+MIN_FREE_PERCENT = 8.
 LOW_VOLTAGE_S = 60.       # duree sous le seuil avant de s'arreter
 JPEG_QUALITY = 80
 
@@ -359,9 +364,10 @@ def prune_empty_days(root: str = SENTRY_DIR) -> None:
         pass
 
 
-def prune(root: str = SENTRY_DIR, max_bytes: int = MAX_BYTES, keep: str | None = None) -> list[str]:
+def prune(root: str = SENTRY_DIR, max_bytes: int | None = None, keep: str | None = None) -> list[str]:
   """Supprime les evenements les plus anciens au-dela du quota. Ne touche qu'a SENTRY_DIR,
   jamais aux trajets : ceux-la ont leur propre nettoyage (system/loggerd/deleter.py)."""
+  max_bytes = state.max_bytes() if max_bytes is None else max_bytes
   dirs = event_dirs(root)
   sizes = {d: dir_size(d) for d in dirs}
   total = sum(sizes.values())
