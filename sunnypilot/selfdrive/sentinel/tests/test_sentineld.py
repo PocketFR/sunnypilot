@@ -238,6 +238,38 @@ class TestAudioWatch:
 
     assert state.noise_rms() == 300
 
+  def test_a_recorder_that_died_is_started_again(self):
+    """Au demarrage la carte son n'est pas toujours prete : sans reprise, le micro
+    resterait muet jusqu'au prochain redemarrage, sans que rien ne le dise."""
+    w = self._watch()
+    w.stopped, w.restarts, w.last_start = False, 0, 0.
+    demarrages = []
+    w._start = lambda now: demarrages.append(now)
+
+    w.check(sentineld.AUDIO_RETRY_S + 1)
+
+    assert demarrages and w.restarts == 1
+
+  def test_a_living_recorder_is_left_alone(self):
+    class Vivant:
+      def poll(self): return None
+    w = self._watch()
+    w.stopped, w.restarts, w.last_start, w.proc = False, 0, 0., Vivant()
+    w._start = lambda now: pytest.fail("ne doit pas relancer un enregistreur vivant")
+
+    w.check(1000.)
+
+    assert w.restarts == 0
+
+  def test_it_does_not_thrash_when_the_card_stays_absent(self):
+    w = self._watch()
+    w.stopped, w.restarts, w.last_start = False, 0, 100.
+    w._start = lambda now: None
+
+    w.check(101.)          # trop tot apres la derniere tentative
+
+    assert w.restarts == 0
+
 
 class TestAudioRecording:
   def test_the_sound_before_the_trigger_is_kept(self, tmp_path, armed):
