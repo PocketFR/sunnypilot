@@ -209,7 +209,7 @@ class TestShockDetector:
   def test_a_knock_triggers_and_reports_its_size(self):
     d = sentineld.ShockDetector()
     d.update(self._bruit())
-    peak = d.update([self.REPOS + 2.0, self.REPOS + 1.6] + self._bruit(10))
+    peak = d.update([self.REPOS + 2.0, self.REPOS + 1.6, self.REPOS + 1.2] + self._bruit(10))
 
     assert peak > 1.5
 
@@ -228,6 +228,29 @@ class TestShockDetector:
 
     assert d.update(derive) == 0.
 
+  def test_a_car_rocked_by_hand_is_caught(self):
+    """Mesure du 22/09/2026 : secouer la voiture donne 36 echantillons au-dessus de 0,05,
+    pic 0,095. C'est le cas qui ressemble a quelqu'un qui force, et il doit passer."""
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+    rng = np.random.default_rng(1)
+    secousse = [self.REPOS + float(x) for x in rng.uniform(-0.095, 0.095, 36)]
+
+    assert d.update(secousse) > 0.
+
+  def test_a_slammed_door_is_caught_too(self):
+    """Portiere claquee : pic mesure a 1,55 m/s2."""
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+
+    assert d.update([self.REPOS + 1.55, self.REPOS + 0.9, self.REPOS + 0.4]) > 1.
+
+  def test_the_measured_noise_floor_stays_below(self):
+    """Bruit au repos mesure : 0,019 m/s2 au pire sur 9480 echantillons."""
+    d = sentineld.ShockDetector()
+
+    assert d.update(self._bruit(n=9480, amplitude=0.019, graine=7)) == 0.
+
   def test_the_threshold_can_be_lowered_without_touching_the_code(self, monkeypatch, tmp_path):
     path = tmp_path / "shock"
     path.write_text("0.05")
@@ -235,7 +258,7 @@ class TestShockDetector:
     d = sentineld.ShockDetector()
     d.update(self._bruit())
 
-    assert d.update([self.REPOS + 0.1, self.REPOS + 0.1]) > 0.
+    assert d.update([self.REPOS + 0.1] * sentineld.SHOCK_SAMPLES) > 0.
 
 
 class TestShockTrigger:
@@ -243,7 +266,7 @@ class TestShockTrigger:
     s = sentineld.Sentry(str(tmp_path / "ev"))
     repos = [(0., 0., 9.8766)] * 50
     s.on_accel(0., repos)
-    s.on_accel(1., [(0., 0., 12.0), (0., 0., 11.5)] + repos)
+    s.on_accel(1., [(0., 0., 12.0), (0., 0., 11.5), (0., 0., 11.0)] + repos)
 
     assert s.recorder.recording and s.recorder.triggers == ["shock"]
     assert s.recorder.details["shock_ms2"] > 1.5
