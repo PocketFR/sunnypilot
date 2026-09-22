@@ -18,6 +18,7 @@ crash Sentry.io.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -83,6 +84,8 @@ CAN_SIGNALS = {
 CAN_DBC = "hyundai_can_generated"
 CAN_BUS = 0              # le faisceau camera, seul bus encore ecoute en veille
 CAN_QUIET_S = 60.        # silence exige avant de considerer un reveil du reseau
+SHOCK_SAMPLES = 2        # echantillons au-dessus du seuil avant de crier au choc
+SHOCK_TRACKING = 0.002   # vitesse a laquelle le repos suit la derive (~5 s a 105 Hz)
 MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
 
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
@@ -360,6 +363,35 @@ def read_json(path: str) -> dict:
     return {}
 
 
+class ShockDetector:
+  """Un choc sur la carrosserie arrive au pare-brise, donc au comma.
+
+  C'est le seul capteur qui puisse voir une voiture vous rentrer dedans sur un parking :
+  le reseau de bord dort a ce moment-la, et aucun message de la voiture ne rapporte un
+  impact. On compare chaque echantillon a une valeur de repos qui suit lentement la
+  derive thermique, mais pas un choc.
+  """
+
+  def __init__(self, threshold: float | None = None, samples: int = SHOCK_SAMPLES):
+    self.threshold = state.shock_threshold() if threshold is None else threshold
+    self.samples = samples
+    self.reference: float | None = None
+
+  def update(self, magnitudes) -> float:
+    """Ecart maximal au repos dans ce lot, ou 0 si rien ne ressort."""
+    hits, peak = 0, 0.
+    for magnitude in magnitudes:
+      if self.reference is None:
+        self.reference = magnitude
+        continue
+      gap = abs(magnitude - self.reference)
+      self.reference += (magnitude - self.reference) * SHOCK_TRACKING
+      if gap > self.threshold:
+        hits += 1
+        peak = max(peak, gap)
+    return peak if hits >= self.samples else 0.
+
+
 class CanWatch:
   """Traduit le bus en evenements comprehensibles, et ne retient que ce qui change.
 
@@ -563,6 +595,7 @@ class Sentry:
     self.recorder = EventRecorder(root)
     self.motion = {cam: MotionDetector(cam) for cam in MOTION_CAMERAS}
     self.can = CanWatch()
+    self.shock = ShockDetector()
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.
@@ -612,6 +645,12 @@ class Sentry:
     elif reveil:
       self.recorder.trigger("can", now, {"can_buses": sorted({f.src for f in frames}), "can_wake": True})
 
+  def on_accel(self, now: float, vectors) -> None:
+    """Secousse ressentie par l'appareil : choc, remorquage, quelqu'un qui s'appuie."""
+    peak = self.shock.update(math.sqrt(x * x + y * y + z * z) for x, y, z in vectors)
+    if peak:
+      self.recorder.trigger("shock", now, {"shock_ms2": round(peak, 2)})
+
   def on_frames(self, frames: dict, now: float) -> None:
     """frames : prefixe de camera -> (plan Y, fonction rendant le JPEG)."""
     for cam, (y, _) in frames.items():
@@ -638,6 +677,7 @@ class Sentry:
             "motion_cameras": list(self.recorder.details.get("motion_cameras") or []), "voltage_mv": self.voltage_mv,
             "can_signals": list(self.recorder.details.get("can_signals") or []),
             "can_decoder": self.can.parser is not None, "can_errors": self.can.errors,
+            "shock_ms2": self.recorder.details.get("shock_ms2"),
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,
@@ -705,6 +745,9 @@ def main() -> None:
   sentry.on_boot(time.monotonic(), power_cut)
 
   sm = messaging.SubMaster(["can", "pandaStates", "peripheralState"])
+  # l'accelerometre publie a 105 Hz : une prise conflatee n'en garderait qu'un echantillon
+  # sur cinquante, et un choc dure moins que cela
+  accel_sock = messaging.sub_sock("accelerometer", conflate=False)
   clients = {cam: VisionIpcClient("camerad", getattr(VisionStreamType, stream), True)
              for cam, stream in CAMERAS.items()}
 
@@ -737,6 +780,10 @@ def main() -> None:
 
     if sm.updated["can"] and len(sm["can"]):
       sentry.on_can(now, sm["can"], sm.logMonoTime["can"])
+
+    secousses = [m.accelerometer.acceleration.v for m in messaging.drain_sock(accel_sock)]
+    if secousses:
+      sentry.on_accel(now, [v for v in secousses if len(v) == 3])
 
     if now - sentry.last_frame >= FRAME_INTERVAL:
       sentry.disk_full = get_available_percent(100.) < MIN_FREE_PERCENT
