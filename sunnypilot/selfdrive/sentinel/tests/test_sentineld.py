@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+from collections import deque
+
 import numpy as np
 import pytest
 
@@ -206,37 +208,75 @@ class TestAudioWatch:
 
   def _watch(self, **kw):
     w = sentineld.AudioWatch.__new__(sentineld.AudioWatch)
-    w.threshold = kw.get("threshold", state.DEFAULT_NOISE_RMS)
+    w.ratio = kw.get("ratio", state.DEFAULT_NOISE_RATIO)
+    w.floor = kw.get("floor", state.DEFAULT_NOISE_FLOOR)
     w.chunks = kw.get("chunks", sentineld.NOISE_CHUNKS)
-    w.streak, w.level, w.proc = 0, 0, None
+    w.streak, w.level, w.background, w.proc = 0, 0, 0, None
+    w.window = deque(maxlen=sentineld.NOISE_WINDOW)
+    return w
+
+  def _ambiance(self, w, rms, n=sentineld.NOISE_READY + 5):
+    """Etablit un fond sonore, comme trente secondes d'environnement le feraient."""
+    w.loud([bruit_audio(rms, graine=i) for i in range(n)])
+    w.streak = 0
     return w
 
   def test_a_silent_car_says_nothing(self):
-    w = self._watch()
-    assert w.loud([bruit_audio(5) for _ in range(20)]) == 0
+    w = self._ambiance(self._watch(), 5)
+    assert w.loud([bruit_audio(5, graine=i) for i in range(20)]) == 0
 
   def test_the_worst_measured_transient_stays_below(self):
-    """822 au pire sur 600 tranches : le seuil doit passer au-dessus."""
-    w = self._watch()
+    """822 au pire sur 600 tranches : le plancher doit passer au-dessus."""
+    w = self._ambiance(self._watch(), 5)
     assert w.loud([bruit_audio(822, graine=i) for i in range(3)]) == 0
 
-  def test_a_lasting_noise_is_reported_with_its_level(self):
+  def test_a_noisy_place_raises_the_bar_by_itself(self):
+    """Gare le long d'une route : un niveau qui alertait au calme devient l'ordinaire."""
+    calme = self._ambiance(self._watch(), 5)
+    bruyant = self._ambiance(self._watch(), 1500)
+
+    fort = [bruit_audio(4000, graine=7), bruit_audio(4000, graine=8)]
+    assert calme.loud(fort) > 0          # rupture nette avec le silence
+    assert bruyant.loud(fort) == 0       # a peine le double du fond : rien d'anormal
+
+  def test_a_real_break_still_gets_through_the_noise(self):
+    w = self._ambiance(self._watch(), 1500)
+    assert w.loud([bruit_audio(20000, graine=9), bruit_audio(18000, graine=10)]) > 0
+
+  def test_the_background_follows_a_lasting_change(self):
+    """La pluie qui commence ne doit alerter qu'une fois, pas pendant une heure."""
+    w = self._ambiance(self._watch(), 5)
+    assert w.loud([bruit_audio(3000, graine=i) for i in range(2)]) > 0   # la rupture
+    w.streak = 0
+    w.loud([bruit_audio(3000, graine=i) for i in range(sentineld.NOISE_WINDOW)])
+    w.streak = 0
+
+    assert w.loud([bruit_audio(3000, graine=99), bruit_audio(3000, graine=98)]) == 0
+
+  def test_nothing_is_judged_before_the_background_is_known(self):
+    """Au demarrage on ne sait pas encore ce qu'est le calme : on se tait."""
     w = self._watch()
+    assert w.loud([bruit_audio(20000, graine=i) for i in range(3)]) == 0
+
+  def test_a_lasting_noise_is_reported_with_its_level(self):
+    w = self._ambiance(self._watch(), 5)
     niveau = w.loud([bruit_audio(6000, graine=1), bruit_audio(6000, graine=2)])
 
     assert niveau > 4000
 
   def test_a_single_click_is_not_enough(self):
     """Un claquement isole du capteur ne doit pas ouvrir un evenement."""
-    w = self._watch()
-    assert w.loud([bruit_audio(6000), bruit_audio(5)]) == 0
+    w = self._ambiance(self._watch(), 5)
+    assert w.loud([bruit_audio(6000, graine=3), bruit_audio(5, graine=4)]) == 0
 
-  def test_the_threshold_can_be_lowered_without_touching_the_code(self, monkeypatch, tmp_path):
-    path = tmp_path / "noise"
-    path.write_text("300")
-    monkeypatch.setattr(state, "NOISE_PATH", str(path))
+  def test_both_settings_can_be_changed_without_touching_the_code(self, monkeypatch, tmp_path):
+    ratio, floor = tmp_path / "ratio", tmp_path / "floor"
+    ratio.write_text("5")
+    floor.write_text("600")
+    monkeypatch.setattr(state, "NOISE_RATIO_PATH", str(ratio))
+    monkeypatch.setattr(state, "NOISE_FLOOR_PATH", str(floor))
 
-    assert state.noise_rms() == 300
+    assert state.noise_ratio() == 5. and state.noise_floor() == 600
 
   def test_the_microphone_is_on_unless_it_was_switched_off(self, monkeypatch, tmp_path):
     """Un reglage absent laisse la surveillance complete : c'est couper qui se decide."""

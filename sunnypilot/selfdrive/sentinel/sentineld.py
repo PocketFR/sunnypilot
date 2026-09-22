@@ -98,6 +98,8 @@ AUDIO_CHUNK = 1600       # 0,1 s, la granularite du detecteur
 AUDIO_PRE_ROLL = 10.     # secondes de son gardees avant le declencheur
 AUDIO_RETRY_S = 5.       # delai avant de relancer un enregistreur mort
 NOISE_CHUNKS = 2         # tranches consecutives au-dessus du seuil (0,2 s)
+NOISE_WINDOW = 300       # tranches gardees pour estimer le fond sonore (30 s)
+NOISE_READY = 20         # tranches minimales avant de juger (2 s)
 MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
 
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
@@ -428,11 +430,15 @@ class AudioWatch:
   pas le son : on prend donc la carte son directement.
   """
 
-  def __init__(self, threshold: int | None = None, chunks: int = NOISE_CHUNKS):
-    self.threshold = state.noise_rms() if threshold is None else threshold
+  def __init__(self, ratio: float | None = None, floor: int | None = None,
+               chunks: int = NOISE_CHUNKS):
+    self.ratio = state.noise_ratio() if ratio is None else ratio
+    self.floor = state.noise_floor() if floor is None else floor
     self.chunks = chunks
     self.streak = 0
     self.level = 0
+    self.background = 0
+    self.window: deque = deque(maxlen=NOISE_WINDOW)
     self.restarts = 0
     self.last_start = 0.
     self.queue: deque = deque(maxlen=int(AUDIO_PRE_ROLL * AUDIO_RATE / AUDIO_CHUNK) * 4)
@@ -492,17 +498,29 @@ class AudioWatch:
     return blocs
 
   def loud(self, blocs) -> int:
-    """Niveau du passage le plus fort, ou 0 si rien ne depasse assez longtemps."""
+    """Niveau du passage le plus fort, ou 0 si rien ne rompt avec le fond du moment.
+
+    Le fond est la mediane des trente dernieres secondes : une mediane ne se laisse pas
+    entrainer par le bruit qu'on cherche justement a detecter, contrairement a une moyenne.
+    Et il faut aussi depasser le plancher, sinon le silence complet ferait de chaque
+    craquement une alerte.
+    """
     pic = 0
     for bloc in blocs:
       ech = np.frombuffer(bloc, dtype=np.int16).astype(np.float32)
       niveau = int(np.sqrt(np.mean(ech * ech))) if len(ech) else 0
       self.level = niveau
-      if niveau > self.threshold:
-        self.streak += 1
-        pic = max(pic, niveau)
-      else:
-        self.streak = 0
+
+      if len(self.window) >= NOISE_READY:
+        fond = float(np.median(self.window))
+        self.background = int(fond)
+        seuil = max(fond * self.ratio, self.floor)
+        if niveau > seuil:
+          self.streak += 1
+          pic = max(pic, niveau)
+        else:
+          self.streak = 0
+      self.window.append(niveau)
     return pic if self.streak >= self.chunks else 0
 
   def _terminate(self) -> None:
@@ -810,7 +828,8 @@ class Sentry:
     blocs = self.audio.drain()
     niveau = self.audio.loud(blocs)
     if niveau:
-      self.recorder.trigger("noise", now, {"noise_rms": niveau})
+      self.recorder.trigger("noise", now, {"noise_rms": niveau,
+                                          "noise_background": self.audio.background})
     self.recorder.offer_audio(blocs)
 
   def on_accel(self, now: float, vectors) -> None:
@@ -848,7 +867,8 @@ class Sentry:
             "shock_ms2": self.recorder.details.get("shock_ms2"),
             "noise_rms": self.recorder.details.get("noise_rms"),
             "microphone": self.audio.proc is not None and self.audio.proc.poll() is None,
-            "noise_level": self.audio.level, "audio_restarts": self.audio.restarts,
+            "noise_level": self.audio.level, "noise_background": self.audio.background,
+            "audio_restarts": self.audio.restarts,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,
