@@ -175,11 +175,19 @@ class TestEventRecorder:
 
 
 class FakeParser:
-  """Un decodeur sans opendbc : les memes valeurs, posees a la main."""
+  """Un decodeur sans opendbc : les memes valeurs et les memes horodatages, poses a la main.
+
+  ts_nanos vaut zero tant qu'un message n'a pas ete recu, comme le vrai (CANParser).
+  """
 
   def __init__(self):
     self.vl = {m: {sig: 0. for sig in signaux} for m, signaux in sentineld.CAN_SIGNALS.items()}
-    self.addresses = {"CGW1": 1345, "CGW2": 1363}
+    self.ts_nanos = {m: {sig: 0 for sig in signaux} for m, signaux in sentineld.CAN_SIGNALS.items()}
+    self.addresses = {1345, 1363}
+
+  def recoit(self, message, t=1):
+    for sig in self.ts_nanos[message]:
+      self.ts_nanos[message][sig] = t
 
   def update(self, strings):
     pass
@@ -195,31 +203,41 @@ class TestCanFiltering:
 
   def test_a_message_that_does_not_change_says_nothing(self):
     watch = self._watch()
+    watch.parser.recoit("CGW1")
     watch.changes([Frame(1345)], 0)          # premiere reception
     assert watch.changes([Frame(1345)], 1) == []
 
   def test_a_door_opening_is_named(self):
     watch = self._watch()
+    watch.parser.recoit("CGW1")
     watch.changes([Frame(1345)], 0)
     watch.parser.vl["CGW1"]["CF_Gway_DrvDrSw"] = 1.
 
     assert watch.changes([Frame(1345)], 1) == ["porte conducteur"]
 
-  def test_the_first_reception_is_not_a_change(self):
-    """Avant sa premiere trame le decodeur renvoie zero : ce n'est pas une porte qui bouge."""
+  def test_a_message_never_received_says_nothing(self):
+    """Avant sa premiere trame le decodeur renvoie zero : ce n'est pas un etat."""
     watch = self._watch()
     watch.parser.vl["CGW1"]["CF_Gway_TrunkTgSw"] = 1.
 
     assert watch.changes([Frame(1345)], 0) == []
 
-  def test_a_message_absent_from_the_batch_is_left_alone(self):
+  def test_the_first_reception_is_not_a_change(self):
     watch = self._watch()
+    watch.parser.recoit("CGW1")
+    watch.parser.vl["CGW1"]["CF_Gway_TrunkTgSw"] = 1.
+
+    assert watch.changes([Frame(1345)], 0) == []     # on prend acte, on ne declenche pas
+    assert watch.changes([Frame(1345)], 1) == []
+
+  def test_each_message_is_followed_on_its_own(self):
+    watch = self._watch()
+    watch.parser.recoit("CGW1"); watch.parser.recoit("CGW2")
     watch.changes([Frame(1345)], 0)
-    watch.changes([Frame(1363)], 1)
     watch.parser.vl["CGW2"]["CF_Gway_RLDrSw"] = 1.
 
-    assert watch.changes([Frame(1345)], 2) == []          # seul CGW1 est passe
-    assert watch.changes([Frame(1363)], 3) == ["porte arriere gauche"]
+    assert watch.changes([Frame(1363)], 1) == ["porte arriere gauche"]
+    assert watch.changes([Frame(1363)], 2) == []
 
   def test_the_network_waking_counts_once(self):
     watch = self._watch()
@@ -243,6 +261,7 @@ class TestCanTriggers:
   def _sentry(self, tmp_path, armed):
     self.s = sentineld.Sentry(str(tmp_path / "ev"))
     self.s.can.parser = FakeParser()
+    self.s.can.parser.recoit("CGW1"); self.s.can.parser.recoit("CGW2")
 
   def test_chatter_on_an_awake_network_records_nothing(self):
     """La nuit de recharge : le reseau parle sans arret, rien ne bouge."""

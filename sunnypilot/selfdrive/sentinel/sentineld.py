@@ -364,7 +364,6 @@ class CanWatch:
   def __init__(self, dbc: str = CAN_DBC, bus: int = CAN_BUS):
     self.parser = None
     self.previous: dict[tuple[str, str], float] = {}
-    self.seen: set[str] = set()
     # au demarrage le bus est silencieux depuis toujours : la premiere trame est un reveil,
     # quelle que soit la valeur de l'horloge monotone du moment
     self.last_frame_at = float("-inf")
@@ -388,21 +387,18 @@ class CanWatch:
       self.errors += 1
       return []
 
-    vus = {f.address for f in frames}
     changed = []
     for message, signals in CAN_SIGNALS.items():
-      address = self.parser.addresses.get(message) if hasattr(self.parser, "addresses") else None
-      if address is not None and address not in vus:
-        continue          # message absent de ce lot : ses valeurs n'ont pas bouge
       for signal, label in signals.items():
+        # tant qu'un message n'a jamais ete recu, le decodeur renvoie une valeur par
+        # defaut : la prendre pour un etat ferait un faux declenchement au premier reveil
+        if not self.parser.ts_nanos[message][signal]:
+          continue
         value = self.parser.vl[message][signal]
         was = self.previous.get((message, signal))
         self.previous[(message, signal)] = value
-        # la premiere valeur d'un message n'est pas un changement : avant sa reception le
-        # decodeur renvoie zero, ce qui ferait un faux declenchement au premier reveil
-        if message in self.seen and was is not None and value != was:
+        if was is not None and value != was:
           changed.append(label)
-      self.seen.add(message)
     return changed
 
   def woke_up(self, now: float) -> bool:
