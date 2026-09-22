@@ -24,7 +24,8 @@ MOTION_AREA_PATH = "/data/sentry_motion_area"
 MOTION_HOLD_PATH = "/data/sentry_motion_hold"
 MAX_GB_PATH = "/data/sentry_max_gb"
 SHOCK_PATH = "/data/sentry_shock_ms2"
-NOISE_PATH = "/data/sentry_noise_rms"
+NOISE_RATIO_PATH = "/data/sentry_noise_ratio"
+NOISE_FLOOR_PATH = "/data/sentry_noise_floor"
 MIC_OFF_PATH = "/data/sentry_microphone_off"
 STATUS_PATH = "/data/sentry_status.json"
 
@@ -72,11 +73,19 @@ DEFAULT_MAX_GB = 3.0
 DEFAULT_SHOCK_MS2 = 0.08
 
 # Bruit : le micro entend ce qu'aucun autre capteur ne voit -- une vitre qui cede, un outil
-# sur une serrure, des voix. Mesure du 22/09/2026, voiture garee, 60 s par tranches de
-# 0,1 s : niveau efficace median 5 sur 32768, p99 a 43, maximum 822. Le silence d'une
-# voiture a l'arret est tel qu'un impact ressort d'un facteur 20 a 100, la ou
-# l'accelerometre n'offrait qu'un facteur 2 sur une traction de poignee.
-DEFAULT_NOISE_RMS = 2000
+# sur une serrure, des voix.
+#
+# Ce qui declenche n'est pas un niveau, c'est une *rupture* : le son doit depasser le fond
+# du moment d'un facteur, pas une valeur fixe. Un seuil absolu ne vaut que dans les
+# conditions ou il a ete mesure -- garee au calme le fond etait de 5 sur 32768 (mesure du
+# 22/09/2026, 60 s par tranches de 0,1 s, p99 a 43, pire transitoire 822), mais le long
+# d'une route, sous la pluie ou dans le vent il monte de plusieurs ordres de grandeur, et
+# le meme seuil deviendrait soit aveugle soit bavard.
+#
+# Le plancher garde son utilite : dans le silence complet, un rapport seul ferait crier au
+# loup pour un craquement de tolerie. Il faut donc les deux, et le plus exigeant gagne.
+DEFAULT_NOISE_RATIO = 8.0
+DEFAULT_NOISE_FLOOR = 1000
 
 
 def is_armed() -> bool:
@@ -223,9 +232,17 @@ def shock_threshold() -> float:
   return _read_number(SHOCK_PATH, DEFAULT_SHOCK_MS2, float)
 
 
-def noise_rms() -> int:
-  """Reglable a chaud : echo 1200 > /data/sentry_noise_rms"""
-  return _read_number(NOISE_PATH, DEFAULT_NOISE_RMS, int)
+def noise_ratio() -> float:
+  """Combien de fois le fond du moment. Reglable a chaud : echo 5 > /data/sentry_noise_ratio"""
+  return _read_number(NOISE_RATIO_PATH, DEFAULT_NOISE_RATIO, float)
+
+
+def noise_floor() -> int:
+  """Niveau en deca duquel on ne declenche jamais, quel que soit le rapport.
+
+  Reglable a chaud : echo 600 > /data/sentry_noise_floor
+  """
+  return _read_number(NOISE_FLOOR_PATH, DEFAULT_NOISE_FLOOR, int)
 
 
 def _read_camera_number(path: str, cam: str | None, default, cast):
