@@ -72,6 +72,13 @@ CAN_SIGNALS = {
     "CF_Gway_SMKRKECmd": "cle mains libres",
     "CF_Gway_WngBuz": "avertisseur",
   },
+  # Une vitre qui descend sur une voiture garee en dit autant qu'une porte qui s'ouvre.
+  "CGW4": {
+    "CF_Gway_DrvWdwStat": "vitre conducteur",
+    "CF_Gway_AstWdwStat": "vitre passager",
+    "CF_Gway_RLWdwState": "vitre arriere gauche",
+    "CF_Gway_RRWdwState": "vitre arriere droite",
+  },
 }
 CAN_DBC = "hyundai_can_generated"
 CAN_BUS = 0              # le faisceau camera, seul bus encore ecoute en veille
