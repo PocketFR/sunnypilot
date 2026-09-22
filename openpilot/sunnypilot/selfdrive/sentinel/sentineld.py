@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
+import threading
+import wave
 import re
 import shutil
 import signal
@@ -86,6 +89,14 @@ CAN_BUS = 0              # le faisceau camera, seul bus encore ecoute en veille
 CAN_QUIET_S = 60.        # silence exige avant de considerer un reveil du reseau
 SHOCK_SAMPLES = 3        # echantillons au-dessus du seuil avant de crier au choc
 SHOCK_TRACKING = 0.002   # vitesse a laquelle le repos suit la derive (~5 s a 105 Hz)
+
+# Micro : capture continue, en 16 kHz mono. Une seconde pese 32 ko, un evenement de 30 s
+# 1 Mo -- contre 15 Mo d'images. Le son precedant le declencheur est garde en memoire,
+# comme la pre-memoire des cameras : on entend l'approche, pas seulement le fracas.
+AUDIO_RATE = 16000
+AUDIO_CHUNK = 1600       # 0,1 s, la granularite du detecteur
+AUDIO_PRE_ROLL = 10.     # secondes de son gardees avant le declencheur
+NOISE_CHUNKS = 2         # tranches consecutives au-dessus du seuil (0,2 s)
 MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
 
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
@@ -220,6 +231,9 @@ class EventRecorder:
                max_event_s: float = MAX_EVENT_S):
     self.root, self.post_event_s, self.max_event_s = root, post_event_s, max_event_s
     self.buffers: dict[str, deque] = {cam: deque(maxlen=pre_roll) for cam in CAMERAS}
+    # le son garde sa propre memoire : dix secondes, comme les images, mais en continu
+    self.audio: deque = deque(maxlen=int(AUDIO_PRE_ROLL * AUDIO_RATE / AUDIO_CHUNK))
+    self.wav: wave.Wave_write | None = None
     self.path: str | None = None
     self.index = 0
     self.last_trigger = 0.
@@ -289,11 +303,48 @@ class EventRecorder:
     self.index, self.frames = 0, 0
     self._write_meta(self._meta())
 
+    self._open_wav()
+
     # la pre-memoire part en indices negatifs : ce qui precede l'evenement
     for cam, buffered in self.buffers.items():
       for offset, jpeg in enumerate(buffered):
         self._write(cam, jpeg, offset - len(buffered))
       buffered.clear()
+
+  def offer_audio(self, blocs) -> None:
+    """Pendant un evenement le son part au fichier, sinon il alimente la memoire."""
+    if not blocs:
+      return
+    if self.wav is not None:
+      try:
+        for bloc in blocs:
+          self.wav.writeframes(bloc)
+      except Exception:
+        self._close_wav()
+    else:
+      self.audio.extend(blocs)
+
+  def _open_wav(self) -> None:
+    if self.path is None:
+      return
+    try:
+      w = wave.open(os.path.join(self.path, "audio.wav"), "wb")
+      w.setnchannels(1)
+      w.setsampwidth(2)
+      w.setframerate(AUDIO_RATE)
+      for bloc in self.audio:        # les dix secondes qui precedent le declencheur
+        w.writeframes(bloc)
+      self.wav = w
+    except Exception:
+      self.wav = None
+
+  def _close_wav(self) -> None:
+    if self.wav is not None:
+      try:
+        self.wav.close()
+      except Exception:
+        pass
+      self.wav = None
 
   def _write(self, cam: str, jpeg: bytes, index: int) -> None:
     assert self.path is not None
@@ -317,6 +368,7 @@ class EventRecorder:
     if not self.recording:
       return None
     path = self.path
+    self._close_wav()
     meta = self._meta()
     meta["closed"] = time.time()
     self._write_meta(meta)
@@ -361,6 +413,75 @@ def read_json(path: str) -> dict:
       return json.load(f)
   except (OSError, ValueError):
     return {}
+
+
+class AudioWatch:
+  """Ecoute continue du micro, avec memoire du son qui precede.
+
+  arecord tourne en permanence et son flux brut est lu par un fil separe : a 2 Hz, la
+  boucle principale ne viderait pas le tube assez vite pendant un encodage JPEG, et le
+  son serait hache. Le fil ne fait que remplir une file ; tout le calcul reste dans la
+  boucle.
+
+  Le service audio d'openpilot (micd) ne tourne qu'en roulage et ne publie qu'un niveau,
+  pas le son : on prend donc la carte son directement.
+  """
+
+  def __init__(self, threshold: int | None = None, chunks: int = NOISE_CHUNKS):
+    self.threshold = state.noise_rms() if threshold is None else threshold
+    self.chunks = chunks
+    self.streak = 0
+    self.level = 0
+    self.queue: deque = deque(maxlen=int(AUDIO_PRE_ROLL * AUDIO_RATE / AUDIO_CHUNK) * 4)
+    self.lock = threading.Lock()
+    self.proc: subprocess.Popen | None = None
+    self.running = False
+    try:
+      self.proc = subprocess.Popen(
+        ["arecord", "-D", "hw:0,0", "-f", "S16_LE", "-r", str(AUDIO_RATE), "-c", "1", "-t", "raw"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+      self.running = True
+      threading.Thread(target=self._read, daemon=True).start()
+    except Exception:
+      # micro indisponible : l'etat le signale, la surveillance continue sans lui
+      self.proc = None
+
+  def _read(self) -> None:
+    taille = AUDIO_CHUNK * 2          # 16 bits par echantillon
+    while self.running and self.proc is not None and self.proc.stdout is not None:
+      bloc = self.proc.stdout.read(taille)
+      if not bloc:
+        break
+      with self.lock:
+        self.queue.append(bloc)
+
+  def drain(self) -> list[bytes]:
+    with self.lock:
+      blocs = list(self.queue)
+      self.queue.clear()
+    return blocs
+
+  def loud(self, blocs) -> int:
+    """Niveau du passage le plus fort, ou 0 si rien ne depasse assez longtemps."""
+    pic = 0
+    for bloc in blocs:
+      ech = np.frombuffer(bloc, dtype=np.int16).astype(np.float32)
+      niveau = int(np.sqrt(np.mean(ech * ech))) if len(ech) else 0
+      self.level = niveau
+      if niveau > self.threshold:
+        self.streak += 1
+        pic = max(pic, niveau)
+      else:
+        self.streak = 0
+    return pic if self.streak >= self.chunks else 0
+
+  def stop(self) -> None:
+    self.running = False
+    if self.proc is not None:
+      try:
+        self.proc.terminate()
+      except Exception:
+        pass
 
 
 class ShockDetector:
@@ -596,6 +717,7 @@ class Sentry:
     self.motion = {cam: MotionDetector(cam) for cam in MOTION_CAMERAS}
     self.can = CanWatch()
     self.shock = ShockDetector()
+    self.audio = AudioWatch()
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.
@@ -645,6 +767,15 @@ class Sentry:
     elif reveil:
       self.recorder.trigger("can", now, {"can_buses": sorted({f.src for f in frames}), "can_wake": True})
 
+  def on_audio(self, now: float) -> None:
+    """Le micro est le seul temoin d'une vitre qui cede : elle ne bouge pas la voiture et
+    ne dit rien au bus."""
+    blocs = self.audio.drain()
+    niveau = self.audio.loud(blocs)
+    if niveau:
+      self.recorder.trigger("noise", now, {"noise_rms": niveau})
+    self.recorder.offer_audio(blocs)
+
   def on_accel(self, now: float, vectors) -> None:
     """Secousse ressentie par l'appareil : choc, remorquage, quelqu'un qui s'appuie."""
     peak = self.shock.update(math.sqrt(x * x + y * y + z * z) for x, y, z in vectors)
@@ -678,6 +809,8 @@ class Sentry:
             "can_signals": list(self.recorder.details.get("can_signals") or []),
             "can_decoder": self.can.parser is not None, "can_errors": self.can.errors,
             "shock_ms2": self.recorder.details.get("shock_ms2"),
+            "noise_rms": self.recorder.details.get("noise_rms"),
+            "microphone": self.audio.proc is not None, "noise_level": self.audio.level,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,
@@ -691,6 +824,7 @@ def finish(sentry) -> bool:
   passer pour une coupure de courant au demarrage suivant. Seule une veille interrompue
   net laisse le marqueur derriere elle.
   """
+  sentry.audio.stop()
   sentry.recorder.close()
   state.clear_running()
   if sentry.stop_reason in ("ignition", "voltage"):
@@ -780,6 +914,8 @@ def main() -> None:
 
     if sm.updated["can"] and len(sm["can"]):
       sentry.on_can(now, sm["can"], sm.logMonoTime["can"])
+
+    sentry.on_audio(now)
 
     secousses = [m.accelerometer.acceleration.v for m in messaging.drain_sock(accel_sock)]
     if secousses:
