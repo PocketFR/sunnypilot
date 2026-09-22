@@ -13,6 +13,13 @@ def frame(width=160, height=120, value=100):
   return np.full((height, width), value, dtype=np.uint8)
 
 
+class Frame:
+  """Une trame telle que la publie pandad : adresse, donnees, bus."""
+
+  def __init__(self, address=1345, dat=b"\x00" * 8, src=0):
+    self.address, self.dat, self.src = address, dat, src
+
+
 def walking(step, width=160, height=120, box=(20, 100, 10, 58), stride=48):
   """Une silhouette qui avance d'une image a l'autre : du mouvement qui dure.
 
@@ -165,6 +172,115 @@ class TestEventRecorder:
     self.rec.trigger("motion", now)
 
     assert self.rec.triggers == ["motion", "can"]
+
+
+class FakeParser:
+  """Un decodeur sans opendbc : les memes valeurs, posees a la main."""
+
+  def __init__(self):
+    self.vl = {m: {sig: 0. for sig in signaux} for m, signaux in sentineld.CAN_SIGNALS.items()}
+    self.addresses = {"CGW1": 1345, "CGW2": 1363}
+
+  def update(self, strings):
+    pass
+
+
+class TestCanFiltering:
+  """Le bus ne declenche que sur ce qui a du sens : une recharge bavarde des heures."""
+
+  def _watch(self):
+    watch = sentineld.CanWatch()
+    watch.parser = FakeParser()
+    return watch
+
+  def test_a_message_that_does_not_change_says_nothing(self):
+    watch = self._watch()
+    watch.changes([Frame(1345)], 0)          # premiere reception
+    assert watch.changes([Frame(1345)], 1) == []
+
+  def test_a_door_opening_is_named(self):
+    watch = self._watch()
+    watch.changes([Frame(1345)], 0)
+    watch.parser.vl["CGW1"]["CF_Gway_DrvDrSw"] = 1.
+
+    assert watch.changes([Frame(1345)], 1) == ["porte conducteur"]
+
+  def test_the_first_reception_is_not_a_change(self):
+    """Avant sa premiere trame le decodeur renvoie zero : ce n'est pas une porte qui bouge."""
+    watch = self._watch()
+    watch.parser.vl["CGW1"]["CF_Gway_TrunkTgSw"] = 1.
+
+    assert watch.changes([Frame(1345)], 0) == []
+
+  def test_a_message_absent_from_the_batch_is_left_alone(self):
+    watch = self._watch()
+    watch.changes([Frame(1345)], 0)
+    watch.changes([Frame(1363)], 1)
+    watch.parser.vl["CGW2"]["CF_Gway_RLDrSw"] = 1.
+
+    assert watch.changes([Frame(1345)], 2) == []          # seul CGW1 est passe
+    assert watch.changes([Frame(1363)], 3) == ["porte arriere gauche"]
+
+  def test_the_network_waking_counts_once(self):
+    watch = self._watch()
+
+    assert watch.woke_up(1000.) is True                   # apres un long silence
+    assert watch.woke_up(1001.) is False                  # le bavardage qui suit, non
+    assert watch.woke_up(1002.) is False
+    assert watch.woke_up(1002. + sentineld.CAN_QUIET_S + 1) is True
+
+  def test_without_a_decoder_the_watch_still_sees_the_wake_up(self):
+    """Autre voiture, DBC absente : on retombe sur l'ancien comportement."""
+    watch = sentineld.CanWatch()
+    watch.parser = None
+
+    assert watch.changes([Frame(1345)], 0) == []
+    assert watch.woke_up(1000.) is True
+
+
+class TestCanTriggers:
+  @pytest.fixture(autouse=True)
+  def _sentry(self, tmp_path, armed):
+    self.s = sentineld.Sentry(str(tmp_path / "ev"))
+    self.s.can.parser = FakeParser()
+
+  def test_chatter_on_an_awake_network_records_nothing(self):
+    """La nuit de recharge : le reseau parle sans arret, rien ne bouge."""
+    self.s.on_can(1000., [Frame(1345)], 0)                # reveil : un evenement
+    self.s.recorder.close()
+    for i in range(1, 200):
+      self.s.on_can(1000. + i, [Frame(1345)], i)
+
+    assert not self.s.recorder.recording
+
+  def test_a_door_opening_records_and_says_which(self):
+    self.s.on_can(1000., [Frame(1345)], 0)
+    self.s.recorder.close()
+    self.s.can.parser.vl["CGW1"]["CF_Gway_AstDrSw"] = 1.
+    self.s.on_can(1001., [Frame(1345)], 1)
+
+    assert self.s.recorder.recording
+    assert self.s.recorder.details["can_signals"] == ["porte passager"]
+
+  def test_the_wake_up_is_recorded_as_such(self):
+    self.s.on_can(1000., [Frame(1345)], 0)
+
+    assert self.s.recorder.recording and self.s.recorder.details.get("can_wake") is True
+
+
+class TestEventLength:
+  def test_an_event_does_not_run_for_hours(self, tmp_path, armed):
+    """Une nuit de recharge avait produit un seul dossier de 3 h 16."""
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), pre_roll=1, post_event_s=20., max_event_s=60.)
+    rec.trigger("can", 0.)
+    for t in range(1, 59):
+      rec.trigger("can", float(t))          # le declencheur reste actif
+      rec.tick(float(t))
+    assert rec.recording
+
+    rec.trigger("can", 61.)
+    rec.tick(61.)
+    assert not rec.recording                # ferme, le suivant rouvrira
 
 
 class TestDiskBudget:
@@ -494,13 +610,13 @@ class TestSentryFrames:
 
   def test_a_can_frame_opens_an_event(self, tmp_path, armed):
     s = self._sentry(tmp_path)
-    s.on_can(0., {0})
+    s.on_can(0., [Frame()], 0)
 
     assert s.recorder.recording and s.recorder.triggers == ["can"]
 
   def test_a_full_disk_stops_the_writing_not_the_watch(self, tmp_path, armed):
     s = self._sentry(tmp_path)
-    s.on_can(0., {0})
+    s.on_can(0., [Frame()], 0)
     path = s.recorder.path
     s.disk_full = True
     s.on_frames(self._frames(), 1.)

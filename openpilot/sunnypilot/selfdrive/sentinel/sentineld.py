@@ -46,6 +46,38 @@ CAMERAS = {"f": "VISION_STREAM_ROAD", "e": "VISION_STREAM_WIDE_ROAD", "d": "VISI
 # donc elle voit venir ce que les deux autres, tournees vers l'avant, manquent.
 MOTION_CAMERAS = tuple(CAMERAS)
 
+# Ce qu'on retient du bus CAN. Une trame ne dit rien par elle-meme : pendant une recharge
+# le reseau bavarde des heures sans que personne n'approche (nuit du 21/09/2026, un seul
+# evenement de 3 h 16). Ce qui a du sens, c'est le changement d'etat d'un organe que l'on
+# ne touche pas en passant : une porte, le coffre, le capot, une poignee, la telecommande.
+# Message de la DBC -> signal -> libelle affiche. Sans accents, comme le reste du fichier ;
+# le lecteur les remet.
+CAN_SIGNALS = {
+  "CGW1": {
+    "CF_Gway_DrvDrSw": "porte conducteur",
+    "CF_Gway_AstDrSw": "porte passager",
+    "CF_Gway_TrunkTgSw": "coffre",
+    "CF_Gway_HoodSw": "capot",
+    "CF_Gway_DrvKeyLockSw": "verrouillage par cle",
+    "CF_Gway_DrvKeyUnlockSw": "deverrouillage par cle",
+    "CF_Gway_PassiveAccessLock": "poignee, verrouillage",
+    "CF_Gway_PassiveAccessUnlock": "poignee, deverrouillage",
+    "CF_Gway_RKECmd": "telecommande",
+    "CF_Gway_HazardSw": "warnings",
+    "CF_Gway_IGNSw": "contact",
+  },
+  "CGW2": {
+    "CF_Gway_RLDrSw": "porte arriere gauche",
+    "CF_Gway_RRDrSw": "porte arriere droite",
+    "CF_Gway_SMKRKECmd": "cle mains libres",
+    "CF_Gway_WngBuz": "avertisseur",
+  },
+}
+CAN_DBC = "hyundai_can_generated"
+CAN_BUS = 0              # le faisceau camera, seul bus encore ecoute en veille
+CAN_QUIET_S = 60.        # silence exige avant de considerer un reveil du reseau
+MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
+
 FRAME_INTERVAL = 1.0      # une image par seconde et par camera
 PRE_ROLL = 10             # images gardees en memoire avant le declencheur
 POST_EVENT_S = 20.        # on continue a enregistrer apres le dernier declencheur
@@ -174,8 +206,9 @@ def dir_size(path: str) -> int:
 class EventRecorder:
   """Ouvre un dossier par evenement, y deverse la pre-memoire puis les images suivantes."""
 
-  def __init__(self, root: str = SENTRY_DIR, pre_roll: int = PRE_ROLL, post_event_s: float = POST_EVENT_S):
-    self.root, self.post_event_s = root, post_event_s
+  def __init__(self, root: str = SENTRY_DIR, pre_roll: int = PRE_ROLL, post_event_s: float = POST_EVENT_S,
+               max_event_s: float = MAX_EVENT_S):
+    self.root, self.post_event_s, self.max_event_s = root, post_event_s, max_event_s
     self.buffers: dict[str, deque] = {cam: deque(maxlen=pre_roll) for cam in CAMERAS}
     self.path: str | None = None
     self.index = 0
@@ -183,7 +216,7 @@ class EventRecorder:
     self.triggers: list[str] = []
     self.details: dict = {}
     self.frames = 0
-    self.started_at = self.started_mono = 0.
+    self.started_at = self.started_mono = self.opened = 0.
 
   @property
   def recording(self) -> bool:
@@ -232,11 +265,15 @@ class EventRecorder:
     if not self.recording:
       return
     self.index += 1
-    if now - self.last_trigger > self.post_event_s:
+    # Un evenement qui dure se referme et laisse le suivant s'ouvrir : une nuit de recharge
+    # avait produit un seul dossier de 3 h 16, inexploitable dans le lecteur comme sur le
+    # disque. Ce qui continue reste enregistre, en morceaux lisibles.
+    if now - self.opened > self.max_event_s or now - self.last_trigger > self.post_event_s:
       self.close()
 
   def _open(self, now: float) -> None:
     self.started_at, self.started_mono = time.time(), time.monotonic()
+    self.opened = now          # meme base que les declencheurs, pour borner la duree
     self.path = event_path(self.root, self.started_at)
     os.makedirs(self.path, exist_ok=True)  # cree aussi le dossier du jour
     self.index, self.frames = 0, 0
@@ -314,6 +351,65 @@ def read_json(path: str) -> dict:
       return json.load(f)
   except (OSError, ValueError):
     return {}
+
+
+class CanWatch:
+  """Traduit le bus en evenements comprehensibles, et ne retient que ce qui change.
+
+  Le decodage passe par la DBC de la voiture, comme le reste d'openpilot. Si elle n'est pas
+  disponible (autre modele, fichier absent), on retombe sur l'ancien comportement : le
+  reveil du reseau seul fait evenement.
+  """
+
+  def __init__(self, dbc: str = CAN_DBC, bus: int = CAN_BUS):
+    self.parser = None
+    self.previous: dict[tuple[str, str], float] = {}
+    self.seen: set[str] = set()
+    # au demarrage le bus est silencieux depuis toujours : la premiere trame est un reveil,
+    # quelle que soit la valeur de l'horloge monotone du moment
+    self.last_frame_at = float("-inf")
+    self.errors = 0
+    try:
+      from opendbc.can.parser import CANParser
+      self.parser = CANParser(dbc, [(m, bus) for m in CAN_SIGNALS], bus)
+    except Exception:
+      # l'absence de decodeur se lit dans l'etat (Sentry.status), pas dans un journal que
+      # personne n'ouvre la nuit ; la surveillance continue sur le reveil du reseau seul
+      self.parser = None
+
+  def changes(self, frames, mono_ns: int) -> list[str]:
+    """Libelles des organes dont l'etat vient de changer."""
+    if self.parser is None or not frames:
+      return []
+
+    try:
+      self.parser.update([(mono_ns, [(f.address, bytes(f.dat), f.src) for f in frames])])
+    except Exception:
+      self.errors += 1
+      return []
+
+    vus = {f.address for f in frames}
+    changed = []
+    for message, signals in CAN_SIGNALS.items():
+      address = self.parser.addresses.get(message) if hasattr(self.parser, "addresses") else None
+      if address is not None and address not in vus:
+        continue          # message absent de ce lot : ses valeurs n'ont pas bouge
+      for signal, label in signals.items():
+        value = self.parser.vl[message][signal]
+        was = self.previous.get((message, signal))
+        self.previous[(message, signal)] = value
+        # la premiere valeur d'un message n'est pas un changement : avant sa reception le
+        # decodeur renvoie zero, ce qui ferait un faux declenchement au premier reveil
+        if message in self.seen and was is not None and value != was:
+          changed.append(label)
+      self.seen.add(message)
+    return changed
+
+  def woke_up(self, now: float) -> bool:
+    """Vrai quand le reseau reprend la parole apres un silence : un reveil, pas un bavardage."""
+    reveil = now - self.last_frame_at > CAN_QUIET_S
+    self.last_frame_at = now
+    return reveil
 
 
 def event_path(root: str, when: float) -> str:
@@ -463,6 +559,7 @@ class Sentry:
   def __init__(self, root: str = SENTRY_DIR):
     self.recorder = EventRecorder(root)
     self.motion = {cam: MotionDetector(cam) for cam in MOTION_CAMERAS}
+    self.can = CanWatch()
     self.watchdog = VoltageWatchdog(state.min_voltage_mv())
     self.root = root
     self.voltage_mv = 0.
@@ -496,10 +593,21 @@ class Sentry:
     """
     self.recorder.trigger("boot", now, {"power_cut": power_cut})
 
-  def on_can(self, now: float, buses: set[int]) -> None:
-    """Hors contact, une trame sur le bus est deja un evenement : reveil du reseau,
-    ouverture, alarme. Le detail des identifiants viendra plus tard si besoin."""
-    self.recorder.trigger("can", now, {"can_buses": sorted(buses)})
+  def on_can(self, now: float, frames, mono_ns: int) -> None:
+    """Deux raisons d'enregistrer, et une seule ligne entre les deux.
+
+    Un organe qui change d'etat -- porte, coffre, capot, poignee, telecommande -- veut dire
+    que quelqu'un touche la voiture, et on sait dire lequel. Le reseau qui se reveille apres
+    un silence veut dire quelque chose aussi, une fois. Mais un reseau deja eveille qui
+    bavarde ne veut rien dire du tout : c'est ce qui avait enregistre une nuit de recharge
+    entiere.
+    """
+    labels = self.can.changes(frames, mono_ns)
+    reveil = self.can.woke_up(now)
+    if labels:
+      self.recorder.trigger("can", now, {"can_signals": labels})
+    elif reveil:
+      self.recorder.trigger("can", now, {"can_buses": sorted({f.src for f in frames}), "can_wake": True})
 
   def on_frames(self, frames: dict, now: float) -> None:
     """frames : prefixe de camera -> (plan Y, fonction rendant le JPEG)."""
@@ -525,6 +633,8 @@ class Sentry:
             "power_w": self.power_w, "som_w": self.som_w,
             "triggers": list(self.recorder.triggers),
             "motion_cameras": list(self.recorder.details.get("motion_cameras") or []), "voltage_mv": self.voltage_mv,
+            "can_signals": list(self.recorder.details.get("can_signals") or []),
+            "can_decoder": self.can.parser is not None, "can_errors": self.can.errors,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,
@@ -623,7 +733,7 @@ def main() -> None:
       break
 
     if sm.updated["can"] and len(sm["can"]):
-      sentry.on_can(now, {c.src for c in sm["can"]})
+      sentry.on_can(now, sm["can"], sm.logMonoTime["can"])
 
     if now - sentry.last_frame >= FRAME_INTERVAL:
       sentry.disk_full = get_available_percent(100.) < MIN_FREE_PERCENT
