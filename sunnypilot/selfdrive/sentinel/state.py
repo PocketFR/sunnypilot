@@ -23,6 +23,7 @@ MOTION_DELTA_PATH = "/data/sentry_motion_delta"
 MOTION_AREA_PATH = "/data/sentry_motion_area"
 MOTION_HOLD_PATH = "/data/sentry_motion_hold"
 MAX_GB_PATH = "/data/sentry_max_gb"
+SHOCK_PATH = "/data/sentry_shock_ms2"
 STATUS_PATH = "/data/sentry_status.json"
 
 # Seuil d'arret par defaut, en millivolts : la valeur openpilot VBATT_PAUSE_CHARGING.
@@ -57,6 +58,12 @@ CAMERA_MOTION = {"d": (0.012, 2)}
 # en plus, le nettoyeur des trajets le reprend sur les segments les plus anciens, qui sont
 # deja sur le NAS.
 DEFAULT_MAX_GB = 3.0
+
+# Choc sur la carrosserie : le comma est colle au pare-brise, il sent ce que la voiture
+# sent. Mesure du 22/09/2026, voiture garee, 9480 echantillons a 105 Hz : la norme de
+# l'acceleration s'ecarte au pire de 0,019 m/s2 de sa valeur de repos. Le seuil est 25
+# fois plus haut, et il faut deux echantillons pour ecarter un sursaut isole du capteur.
+DEFAULT_SHOCK_MS2 = 0.5
 
 
 def is_armed() -> bool:
@@ -172,6 +179,11 @@ def motion_delta() -> int:
 def max_bytes() -> int:
   """Reglable a chaud : echo 4 > /data/sentry_max_gb"""
   return int(_read_number(MAX_GB_PATH, DEFAULT_MAX_GB, float) * 1024 ** 3)
+
+
+def shock_threshold() -> float:
+  """Reglable a chaud : echo 0.3 > /data/sentry_shock_ms2"""
+  return _read_number(SHOCK_PATH, DEFAULT_SHOCK_MS2, float)
 
 
 def _read_camera_number(path: str, cam: str | None, default, cast):

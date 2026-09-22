@@ -193,6 +193,69 @@ class FakeParser:
     pass
 
 
+class TestShockDetector:
+  """Mesure du 22/09/2026 : au repos la norme ne s'ecarte jamais de plus de 0,02 m/s2."""
+
+  REPOS = 9.8766          # pesanteur mesuree sur la voiture garee
+
+  def _bruit(self, n=200, amplitude=0.02, graine=0):
+    rng = np.random.default_rng(graine)
+    return [self.REPOS + float(x) for x in rng.uniform(-amplitude, amplitude, n)]
+
+  def test_the_parked_car_never_triggers(self):
+    d = sentineld.ShockDetector()
+    assert d.update(self._bruit()) == 0.
+
+  def test_a_knock_triggers_and_reports_its_size(self):
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+    peak = d.update([self.REPOS + 2.0, self.REPOS + 1.6] + self._bruit(10))
+
+    assert peak > 1.5
+
+  def test_a_single_spike_is_not_a_shock(self):
+    """Un sursaut isole du capteur ne doit pas reveiller la voiture."""
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+
+    assert d.update([self.REPOS + 3.0] + self._bruit(10)) == 0.
+
+  def test_a_slow_drift_is_followed_not_reported(self):
+    """La pesanteur mesuree bouge avec la temperature : ce n'est pas un choc."""
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+    derive = [self.REPOS + 0.3 * i / 3000 for i in range(3000)]
+
+    assert d.update(derive) == 0.
+
+  def test_the_threshold_can_be_lowered_without_touching_the_code(self, monkeypatch, tmp_path):
+    path = tmp_path / "shock"
+    path.write_text("0.05")
+    monkeypatch.setattr(state, "SHOCK_PATH", str(path))
+    d = sentineld.ShockDetector()
+    d.update(self._bruit())
+
+    assert d.update([self.REPOS + 0.1, self.REPOS + 0.1]) > 0.
+
+
+class TestShockTrigger:
+  def test_a_shock_opens_an_event_that_says_how_hard(self, tmp_path, armed):
+    s = sentineld.Sentry(str(tmp_path / "ev"))
+    repos = [(0., 0., 9.8766)] * 50
+    s.on_accel(0., repos)
+    s.on_accel(1., [(0., 0., 12.0), (0., 0., 11.5)] + repos)
+
+    assert s.recorder.recording and s.recorder.triggers == ["shock"]
+    assert s.recorder.details["shock_ms2"] > 1.5
+
+  def test_a_still_car_records_nothing(self, tmp_path, armed):
+    s = sentineld.Sentry(str(tmp_path / "ev"))
+    for t in range(20):
+      s.on_accel(float(t), [(0., 0., 9.8766 + 0.01 * (t % 2))] * 50)
+
+    assert not s.recorder.recording
+
+
 class TestCanFiltering:
   """Le bus ne declenche que sur ce qui a du sens : une recharge bavarde des heures."""
 
