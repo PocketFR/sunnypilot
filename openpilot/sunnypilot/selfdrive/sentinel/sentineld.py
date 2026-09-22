@@ -96,6 +96,7 @@ SHOCK_TRACKING = 0.002   # vitesse a laquelle le repos suit la derive (~5 s a 10
 AUDIO_RATE = 16000
 AUDIO_CHUNK = 1600       # 0,1 s, la granularite du detecteur
 AUDIO_PRE_ROLL = 10.     # secondes de son gardees avant le declencheur
+AUDIO_RETRY_S = 5.       # delai avant de relancer un enregistreur mort
 NOISE_CHUNKS = 2         # tranches consecutives au-dessus du seuil (0,2 s)
 MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
 
@@ -432,24 +433,44 @@ class AudioWatch:
     self.chunks = chunks
     self.streak = 0
     self.level = 0
+    self.restarts = 0
+    self.last_start = 0.
     self.queue: deque = deque(maxlen=int(AUDIO_PRE_ROLL * AUDIO_RATE / AUDIO_CHUNK) * 4)
     self.lock = threading.Lock()
     self.proc: subprocess.Popen | None = None
-    self.running = False
+    self.stopped = False
+    self._start(0.)
+
+  def _start(self, now: float) -> None:
+    self.last_start = now
     try:
-      self.proc = subprocess.Popen(
+      proc = subprocess.Popen(
         ["arecord", "-D", "hw:0,0", "-f", "S16_LE", "-r", str(AUDIO_RATE), "-c", "1", "-t", "raw"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-      self.running = True
-      threading.Thread(target=self._read, daemon=True).start()
     except Exception:
       # micro indisponible : l'etat le signale, la surveillance continue sans lui
       self.proc = None
+      return
+    self.proc = proc
+    threading.Thread(target=self._read, args=(proc,), daemon=True).start()
 
-  def _read(self) -> None:
+  def check(self, now: float) -> None:
+    """Relance l'enregistreur s'il est mort.
+
+    Au demarrage la carte son n'est pas toujours prete : arecord sort aussitot, et sans
+    cette reprise le micro resterait muet jusqu'au prochain redemarrage, en silence.
+    """
+    if self.stopped or (self.proc is not None and self.proc.poll() is None):
+      return
+    if now - self.last_start < AUDIO_RETRY_S:
+      return
+    self.restarts += 1
+    self._start(now)
+
+  def _read(self, proc) -> None:
     taille = AUDIO_CHUNK * 2          # 16 bits par echantillon
-    while self.running and self.proc is not None and self.proc.stdout is not None:
-      bloc = self.proc.stdout.read(taille)
+    while proc.stdout is not None:
+      bloc = proc.stdout.read(taille)
       if not bloc:
         break
       with self.lock:
@@ -476,7 +497,7 @@ class AudioWatch:
     return pic if self.streak >= self.chunks else 0
 
   def stop(self) -> None:
-    self.running = False
+    self.stopped = True
     if self.proc is not None:
       try:
         self.proc.terminate()
@@ -770,6 +791,7 @@ class Sentry:
   def on_audio(self, now: float) -> None:
     """Le micro est le seul temoin d'une vitre qui cede : elle ne bouge pas la voiture et
     ne dit rien au bus."""
+    self.audio.check(now)
     blocs = self.audio.drain()
     niveau = self.audio.loud(blocs)
     if niveau:
@@ -810,7 +832,8 @@ class Sentry:
             "can_decoder": self.can.parser is not None, "can_errors": self.can.errors,
             "shock_ms2": self.recorder.details.get("shock_ms2"),
             "noise_rms": self.recorder.details.get("noise_rms"),
-            "microphone": self.audio.proc is not None, "noise_level": self.audio.level,
+            "microphone": self.audio.proc is not None and self.audio.proc.poll() is None,
+            "noise_level": self.audio.level, "audio_restarts": self.audio.restarts,
             "min_voltage_mv": self.watchdog.minimum_mv, "bytes": dir_size(self.root),
             "events": len(event_dirs(self.root)), "last_event": last_event_time(self.root),
             "disk_full": self.disk_full, "stop_reason": self.stop_reason,
