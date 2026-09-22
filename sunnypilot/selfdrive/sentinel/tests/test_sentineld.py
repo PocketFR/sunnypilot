@@ -193,6 +193,85 @@ class FakeParser:
     pass
 
 
+def bruit_audio(rms, n=None, graine=0):
+  """Une tranche de son de niveau efficace voulu, en PCM 16 bits."""
+  n = n or sentineld.AUDIO_CHUNK
+  rng = np.random.default_rng(graine)
+  ech = rng.normal(0, rms, n).clip(-32768, 32767).astype(np.int16)
+  return ech.tobytes()
+
+
+class TestAudioWatch:
+  """Mesure du 22/09/2026, voiture garee : niveau median 5 sur 32768, maximum 822."""
+
+  def _watch(self, **kw):
+    w = sentineld.AudioWatch.__new__(sentineld.AudioWatch)
+    w.threshold = kw.get("threshold", state.DEFAULT_NOISE_RMS)
+    w.chunks = kw.get("chunks", sentineld.NOISE_CHUNKS)
+    w.streak, w.level, w.proc = 0, 0, None
+    return w
+
+  def test_a_silent_car_says_nothing(self):
+    w = self._watch()
+    assert w.loud([bruit_audio(5) for _ in range(20)]) == 0
+
+  def test_the_worst_measured_transient_stays_below(self):
+    """822 au pire sur 600 tranches : le seuil doit passer au-dessus."""
+    w = self._watch()
+    assert w.loud([bruit_audio(822, graine=i) for i in range(3)]) == 0
+
+  def test_a_lasting_noise_is_reported_with_its_level(self):
+    w = self._watch()
+    niveau = w.loud([bruit_audio(6000, graine=1), bruit_audio(6000, graine=2)])
+
+    assert niveau > 4000
+
+  def test_a_single_click_is_not_enough(self):
+    """Un claquement isole du capteur ne doit pas ouvrir un evenement."""
+    w = self._watch()
+    assert w.loud([bruit_audio(6000), bruit_audio(5)]) == 0
+
+  def test_the_threshold_can_be_lowered_without_touching_the_code(self, monkeypatch, tmp_path):
+    path = tmp_path / "noise"
+    path.write_text("300")
+    monkeypatch.setattr(state, "NOISE_PATH", str(path))
+
+    assert state.noise_rms() == 300
+
+
+class TestAudioRecording:
+  def test_the_sound_before_the_trigger_is_kept(self, tmp_path, armed):
+    """Dix secondes de memoire, comme les images : on entend l'approche."""
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), pre_roll=2)
+    avant = [bruit_audio(5) for _ in range(30)]
+    rec.offer_audio(avant)
+    rec.trigger("noise", 0.)
+    rec.offer_audio([bruit_audio(6000) for _ in range(10)])
+    rec.close()
+
+    chemin = os.path.join(sentineld.event_dirs(str(tmp_path / "ev"))[0], "audio.wav")
+    import wave
+    with wave.open(chemin) as w:
+      assert w.getframerate() == sentineld.AUDIO_RATE
+      assert w.getnchannels() == 1
+      # 30 tranches offertes avant, mais la memoire n'en garde que dix secondes
+      gardees = min(len(avant), rec.audio.maxlen)
+      assert w.getnframes() == (gardees + 10) * sentineld.AUDIO_CHUNK
+
+  def test_nothing_is_written_before_a_trigger(self, tmp_path, armed):
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), pre_roll=2)
+    rec.offer_audio([bruit_audio(5) for _ in range(5)])
+
+    assert not rec.recording and rec.wav is None
+
+  def test_the_file_is_closed_with_the_event(self, tmp_path, armed):
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), pre_roll=2)
+    rec.trigger("noise", 0.)
+    assert rec.wav is not None
+    rec.close()
+    assert rec.wav is None
+
+
 class TestShockDetector:
   """Mesure du 22/09/2026 : au repos la norme ne s'ecarte jamais de plus de 0,02 m/s2."""
 
