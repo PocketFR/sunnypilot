@@ -439,7 +439,8 @@ class AudioWatch:
     self.lock = threading.Lock()
     self.proc: subprocess.Popen | None = None
     self.stopped = False
-    self._start(0.)
+    if state.mic_enabled():
+      self._start(0.)
 
   def _start(self, now: float) -> None:
     self.last_start = now
@@ -455,12 +456,20 @@ class AudioWatch:
     threading.Thread(target=self._read, args=(proc,), daemon=True).start()
 
   def check(self, now: float) -> None:
-    """Relance l'enregistreur s'il est mort.
+    """Suit l'interrupteur de l'ecran, et relance l'enregistreur s'il est mort.
 
     Au demarrage la carte son n'est pas toujours prete : arecord sort aussitot, et sans
     cette reprise le micro resterait muet jusqu'au prochain redemarrage, en silence.
     """
-    if self.stopped or (self.proc is not None and self.proc.poll() is None):
+    if self.stopped:
+      return
+
+    if not state.mic_enabled():
+      if self.proc is not None:
+        self._terminate()      # coupe depuis l'ecran : on jette aussi ce qui restait
+      return
+
+    if self.proc is not None and self.proc.poll() is None:
       return
     if now - self.last_start < AUDIO_RETRY_S:
       return
@@ -496,13 +505,19 @@ class AudioWatch:
         self.streak = 0
     return pic if self.streak >= self.chunks else 0
 
-  def stop(self) -> None:
-    self.stopped = True
+  def _terminate(self) -> None:
     if self.proc is not None:
       try:
         self.proc.terminate()
       except Exception:
         pass
+      self.proc = None
+    with self.lock:
+      self.queue.clear()
+
+  def stop(self) -> None:
+    self.stopped = True
+    self._terminate()
 
 
 class ShockDetector:

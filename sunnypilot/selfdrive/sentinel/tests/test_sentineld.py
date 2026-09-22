@@ -238,9 +238,50 @@ class TestAudioWatch:
 
     assert state.noise_rms() == 300
 
-  def test_a_recorder_that_died_is_started_again(self):
+  def test_the_microphone_is_on_unless_it_was_switched_off(self, monkeypatch, tmp_path):
+    """Un reglage absent laisse la surveillance complete : c'est couper qui se decide."""
+    path = tmp_path / "mic_off"
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(path))
+
+    assert state.mic_enabled()
+    state.set_mic(False)
+    assert not state.mic_enabled() and path.exists()
+    state.set_mic(True)
+    assert state.mic_enabled() and not path.exists()
+
+  def test_switching_it_off_stops_the_recorder(self, monkeypatch, tmp_path):
+    arrets = []
+
+    class Vivant:
+      def poll(self): return None
+
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(tmp_path / "mic_off"))
+    state.set_mic(False)
+    w = self._watch()
+    w.stopped, w.restarts, w.last_start, w.proc = False, 0, 0., Vivant()
+    w._terminate = lambda: arrets.append(True)
+    w._start = lambda now: pytest.fail("ne doit pas relancer un micro coupe")
+
+    w.check(1000.)
+
+    assert arrets
+
+  def test_switching_it_back_on_starts_it_again(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(tmp_path / "mic_off"))
+    state.set_mic(True)
+    demarrages = []
+    w = self._watch()
+    w.stopped, w.restarts, w.last_start, w.proc = False, 0, 0., None
+    w._start = lambda now: demarrages.append(now)
+
+    w.check(sentineld.AUDIO_RETRY_S + 1)
+
+    assert demarrages
+
+  def test_a_recorder_that_died_is_started_again(self, monkeypatch, tmp_path):
     """Au demarrage la carte son n'est pas toujours prete : sans reprise, le micro
     resterait muet jusqu'au prochain redemarrage, sans que rien ne le dise."""
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(tmp_path / "mic_off"))
     w = self._watch()
     w.stopped, w.restarts, w.last_start = False, 0, 0.
     demarrages = []
@@ -250,7 +291,9 @@ class TestAudioWatch:
 
     assert demarrages and w.restarts == 1
 
-  def test_a_living_recorder_is_left_alone(self):
+  def test_a_living_recorder_is_left_alone(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(tmp_path / "mic_off"))
+
     class Vivant:
       def poll(self): return None
     w = self._watch()
@@ -261,7 +304,8 @@ class TestAudioWatch:
 
     assert w.restarts == 0
 
-  def test_it_does_not_thrash_when_the_card_stays_absent(self):
+  def test_it_does_not_thrash_when_the_card_stays_absent(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "MIC_OFF_PATH", str(tmp_path / "mic_off"))
     w = self._watch()
     w.stopped, w.restarts, w.last_start = False, 0, 100.
     w._start = lambda now: None
