@@ -138,7 +138,9 @@ procs = [
   PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
-  PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC),
+  # sensord en veille aussi : l'accelerometre du comma est colle au pare-brise, c'est le
+  # seul capteur qui sente un choc sur la carrosserie. Le bus CAN, lui, dort a ce moment-la.
+  PythonProcess("sensord", "system.sensord.sensord", or_(only_onroad, sentinel), enabled=not PC),
   # pendant la veille, pas d'interface : l'ecran reste noir et le seul moyen de
   # desarmer est de demarrer le moteur, qui fait office d'authentification
   PythonProcess("ui", "selfdrive.ui.ui", not_sentinel, restart_if_crash=True),
