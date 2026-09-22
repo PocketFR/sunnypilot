@@ -60,10 +60,14 @@ CAMERA_MOTION = {"d": (0.012, 2)}
 DEFAULT_MAX_GB = 3.0
 
 # Choc sur la carrosserie : le comma est colle au pare-brise, il sent ce que la voiture
-# sent. Mesure du 22/09/2026, voiture garee, 9480 echantillons a 105 Hz : la norme de
-# l'acceleration s'ecarte au pire de 0,019 m/s2 de sa valeur de repos. Le seuil est 25
-# fois plus haut, et il faut deux echantillons pour ecarter un sursaut isole du capteur.
-DEFAULT_SHOCK_MS2 = 0.5
+# sent. Trois mesures du 22/09/2026, a 105 Hz :
+#   repos, voiture garee, 9480 echantillons : ecart maximal 0,019 m/s2
+#   quelqu'un secoue la voiture a la main   : 36 echantillons au-dessus de 0,05, pic 0,095
+#   portiere claquee                        : pic 1,55, dont 30 echantillons au-dessus de 0,08
+# Le premier seuil essaye, 0,5, attrapait la portiere mais laissait passer la secousse --
+# or c'est elle qui ressemble a quelqu'un qui s'appuie ou force. A 0,08 sur trois
+# echantillons, les deux passent, avec encore quatre fois le bruit de fond de marge.
+DEFAULT_SHOCK_MS2 = 0.08
 
 
 def is_armed() -> bool:
