@@ -61,8 +61,8 @@ CAN_SIGNALS = {
     "CF_Gway_HoodSw": "capot",
     "CF_Gway_DrvKeyLockSw": "verrouillage par cle",
     "CF_Gway_DrvKeyUnlockSw": "deverrouillage par cle",
-    "CF_Gway_PassiveAccessLock": "poignee, verrouillage",
-    "CF_Gway_PassiveAccessUnlock": "poignee, deverrouillage",
+    "CF_Gway_PassiveAccessLock": "poignee verrouillage",
+    "CF_Gway_PassiveAccessUnlock": "poignee deverrouillage",
     "CF_Gway_RKECmd": "telecommande",
     "CF_Gway_HazardSw": "warnings",
     "CF_Gway_IGNSw": "contact",
@@ -84,7 +84,7 @@ CAN_SIGNALS = {
 CAN_DBC = "hyundai_can_generated"
 CAN_BUS = 0              # le faisceau camera, seul bus encore ecoute en veille
 CAN_QUIET_S = 60.        # silence exige avant de considerer un reveil du reseau
-SHOCK_SAMPLES = 2        # echantillons au-dessus du seuil avant de crier au choc
+SHOCK_SAMPLES = 3        # echantillons au-dessus du seuil avant de crier au choc
 SHOCK_TRACKING = 0.002   # vitesse a laquelle le repos suit la derive (~5 s a 105 Hz)
 MAX_EVENT_S = 300.       # un evenement se ferme et se rouvre plutot que de durer des heures
 
