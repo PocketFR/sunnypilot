@@ -25,6 +25,7 @@ MOTION_HOLD_PATH = "/data/sentry_motion_hold"
 MAX_GB_PATH = "/data/sentry_max_gb"
 SHOCK_PATH = "/data/sentry_shock_ms2"
 NOISE_PATH = "/data/sentry_noise_rms"
+MIC_OFF_PATH = "/data/sentry_microphone_off"
 STATUS_PATH = "/data/sentry_status.json"
 
 # Seuil d'arret par defaut, en millivolts : la valeur openpilot VBATT_PAUSE_CHARGING.
@@ -161,6 +162,30 @@ def set_auto(enabled: bool) -> None:
   else:
     try:
       os.unlink(AUTO_PATH)
+    except OSError:
+      pass
+
+
+def mic_enabled() -> bool:
+  """Le micro est actif par defaut : le fichier marque l'extinction, pas l'allumage.
+
+  Un reglage absent doit laisser la surveillance complete ; c'est le geste de couper qui
+  demande une decision, pas celui d'ecouter.
+  """
+  return not os.path.exists(MIC_OFF_PATH)
+
+
+def set_mic(enabled: bool) -> None:
+  """Reglable depuis l'ecran, sous le panneau sentinelle."""
+  if enabled:
+    try:
+      os.unlink(MIC_OFF_PATH)
+    except OSError:
+      pass
+  else:
+    try:
+      with open(MIC_OFF_PATH, "w") as f:
+        f.write("1")
     except OSError:
       pass
 

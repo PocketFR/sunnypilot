@@ -41,12 +41,20 @@ class SentinelLayoutMici(NavScroller):
     self._auto_btn = BigToggle(tr("arm at engine off"), "", initial_state=state.auto_enabled(),
                                toggle_callback=state.set_auto)
 
-    self._scroller.add_widgets([self._state, self._power, self._arm_btn, self._auto_btn])
+    # Le micro entend ce qu'aucune camera ne voit -- une vitre qui cede ne bouge pas la
+    # voiture et ne dit rien au bus -- mais il enregistre aussi les voix alentour. Le
+    # choix se fait donc ici, et l'ecoute reste active tant qu'on ne l'a pas coupee.
+    self._mic_btn = BigToggle(tr("microphone"), "", initial_state=state.mic_enabled(),
+                              toggle_callback=state.set_mic)
+
+    self._scroller.add_widgets([self._state, self._power, self._arm_btn, self._auto_btn,
+                                self._mic_btn])
 
   def show_event(self):
     super().show_event()
     self._status = state.read_status()
     self._auto_btn.set_checked(state.auto_enabled())
+    self._mic_btn.set_checked(state.mic_enabled())
     self._refresh()
 
   def _refresh(self) -> None:
