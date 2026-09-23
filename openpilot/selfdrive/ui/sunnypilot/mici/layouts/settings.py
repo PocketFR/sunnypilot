@@ -81,6 +81,8 @@ class SettingsLayoutSP(OP.SettingsLayout):
     items.insert(1, models_btn)
     items.insert(2, diagnostics_btn)
     items.insert(3, sentinel_btn)
+    # l'amont posait sunnylink en 5 dans une liste sans nos deux entrees : on decale
+    # d'autant pour lui garder la meme place relative
     items.insert(7, sunnylink_btn)
 
     # front slots (only one ever visible at a time): exit-always-offroad, then enable-onroad
