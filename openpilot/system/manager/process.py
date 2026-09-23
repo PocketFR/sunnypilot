@@ -68,10 +68,18 @@ class ManagerProcess(ABC):
   enabled = True
   name = ""
   shutting_down = False
+  # Une surveillance qui meurt la nuit et ne revient pas ne surveille plus rien, et rien
+  # ne le signale : l'ecran est eteint. Le manager ne relance un processus mort que si on
+  # le lui demande (voir ensure_running plus bas).
+  restart_if_crash = False
 
   @abstractmethod
   def start(self) -> None:
     pass
+
+  def restart(self) -> None:
+    self.stop(sig=signal.SIGKILL)
+    self.start()
 
   def stop(self, retry: bool = True, block: bool = True, sig: signal.Signals | None = None) -> int | None:
     if self.proc is None:
@@ -157,13 +165,14 @@ class NativeProcess(ManagerProcess):
 
 
 class PythonProcess(ManagerProcess):
-  def __init__(self, name, module, should_run, enabled=True, sigkill=False):
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_if_crash=False):
     self.name = name
     self.module = module
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
     self.launcher = launcher
+    self.restart_if_crash = restart_if_crash
 
   def start(self) -> None:
     # In case we only tried a non blocking stop we need to stop it before restarting
@@ -230,6 +239,9 @@ def ensure_running(procs: ValuesView[ManagerProcess], started: bool, params: Par
   running = []
   for p in procs:
     if p.enabled and p.name not in not_run and p.should_run(started, params, CP):
+      if p.restart_if_crash and p.proc is not None and not p.proc.is_alive():
+        cloudlog.error(f'Restarting {p.name} (exitcode {p.proc.exitcode})')
+        p.restart()
       running.append(p)
     else:
       p.stop(block=False)
