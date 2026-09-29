@@ -92,7 +92,11 @@ class LongitudinalPlannerSP:
 
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise_candidate, a_ego),
-      LongitudinalPlanSource.sccVision: (self.scc.vision.output_v_target, self.scc.vision.output_a_target),
+      # The model candidate rides in the sccVision slot: the dict is keyed by enumerant and no
+      # enumerant can be added to LongitudinalPlanSource on a prebuilt device. Both read modelV2,
+      # so the grouping is honest; smartCruiseControl.vision.vTarget then reports the pair's min.
+      LongitudinalPlanSource.sccVision: (min(self.scc.vision.output_v_target, self.scc.model.output_v_target),
+                                         self.scc.vision.output_a_target),
       LongitudinalPlanSource.sccMap: (self.scc.map.output_v_target, self.scc.map.output_a_target),
       LongitudinalPlanSource.speedLimitAssist: (self.sla.output_v_target, self.sla.output_a_target),
     }
@@ -128,7 +132,8 @@ class LongitudinalPlannerSP:
     # Vision Control
     sccVision = smartCruiseControl.vision
     sccVision.state = self.scc.vision.state
-    sccVision.vTarget = float(self.scc.vision.output_v_target)
+    # Reports the pair actually entered in the min(), see update_targets.
+    sccVision.vTarget = float(min(self.scc.vision.output_v_target, self.scc.model.output_v_target))
     sccVision.aTarget = float(self.scc.vision.output_a_target)
     sccVision.currentLateralAccel = float(self.scc.vision.current_lat_acc)
     sccVision.maxPredictedLateralAccel = float(self.scc.vision.max_pred_lat_acc)
