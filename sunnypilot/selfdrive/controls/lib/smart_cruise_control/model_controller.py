@@ -89,12 +89,17 @@ class SmartCruiseControlModel:
   def _update_calculations(self, sm: messaging.SubMaster) -> bool:
     """Returns True when the model trajectory is usable this frame."""
     md = sm['modelV2']
+    # Same length guard as parse_model in selfdrive/controls/lib/longitudinal_planner.py.
     if len(md.velocity.x) != ModelConstants.IDX_N or len(md.acceleration.x) != ModelConstants.IDX_N:
       return False
 
-    # Same length guard as parse_model in selfdrive/controls/lib/longitudinal_planner.py.
-    self.v_planned = float(np.min(md.velocity.x[:self.horizon_idx]))
-    self.a_planned = float(np.min(md.acceleration.x[:self.horizon_idx]))
+    # capnp list readers are iterable but cannot be sliced - indexing one with a slice raises
+    # "TypeError: an integer is required" - so copy into an array before taking the horizon.
+    v = np.fromiter(md.velocity.x, dtype=float, count=ModelConstants.IDX_N)
+    a = np.fromiter(md.acceleration.x, dtype=float, count=ModelConstants.IDX_N)
+
+    self.v_planned = float(np.min(v[:self.horizon_idx]))
+    self.a_planned = float(np.min(a[:self.horizon_idx]))
     return True
 
   def _update_state(self, usable: bool) -> None:
