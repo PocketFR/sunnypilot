@@ -27,7 +27,21 @@ _TURNING_LAT_ACC_TH = 1.6  # Lat Acc threshold to trigger turning state.
 _LEAVING_LAT_ACC_TH = 1.3  # Lat Acc threshold to trigger leaving turn state.
 _FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger the end of the turn cycle.
 
-_A_LAT_REG_MAX = 2.  # Maximum lateral acceleration
+# Lateral acceleration budget, by the radius of the curve ahead. A single flat 2.0 m/s^2 is
+# about right for tight corners but far too cautious on open bends: measured over two crossings
+# of the Col de la Republique (route 0000034c and 0000034f, 2026-09-28), the driver held a
+# median 4.17 m/s^2 through 40-60 m radius curves and 2.94 through 60-100 m, driving 15 and
+# 10 km/h faster than this controller was asking for. In tight corners elsewhere - roundabouts
+# and town junctions, 8 to 40 m - the same driver was only 3 to 4 km/h above it.
+#
+# The envelope itself is not what differs: at 40-60 m the 90th percentile is 4.54 on the pass
+# against 5.05 elsewhere. What differs is how often it is used. So indexing the budget on the
+# radius alone is legitimate, and no road-class signal is needed - which is just as well, since
+# the speed limit is only valid 7 % of the time on these roads.
+#
+# Held flat below 25 m so that roundabouts keep exactly the target they have today.
+_A_LAT_RADIUS_BP = [25., 60., 120.]  # m, radius of the curve ahead
+_A_LAT_RADIUS_V = [2.0, 3.0, 3.0]    # m/s^2, budget at those radii
 
 _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on a_target when not overshooting.
 
@@ -96,8 +110,13 @@ class SmartCruiseControlVision:
       v_ego = max(self.v_ego, 0.1)  # ensure a value greater than 0 for calculations
       max_curve = self.max_pred_lat_acc / (v_ego**2)
 
-      # Get the target velocity for the maximum curve
-      self.v_target = (_A_LAT_REG_MAX / max_curve) ** 0.5
+      # Get the target velocity for the maximum curve, on a budget that opens up as the curve
+      # opens up. np.interp clamps, so anything tighter than 25 m keeps the original 2.0 and
+      # anything more open than 120 m sits at 3.0 - by which radius the curve has stopped being
+      # the binding constraint anyway, the speed limit or the driver's set speed winning first.
+      radius = 1.0 / max(max_curve, 1e-6)
+      a_lat_max = float(np.interp(radius, _A_LAT_RADIUS_BP, _A_LAT_RADIUS_V))
+      self.v_target = (a_lat_max / max_curve) ** 0.5
 
   def _update_state_machine(self) -> tuple[bool, bool]:
     # ENABLED, ENTERING, TURNING, LEAVING, OVERRIDING

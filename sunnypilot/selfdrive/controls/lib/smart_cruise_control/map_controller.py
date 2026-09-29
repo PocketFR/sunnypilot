@@ -151,8 +151,12 @@ class SmartCruiseControlMap:
         a = 0.5 * TARGET_JERK
         b = self.a_ego
         c = self.v_ego - tv
-        t_a = -1 * ((b**2 - 4 * a * c) ** 0.5 + b) / 2 * a
-        t_b = ((b**2 - 4 * a * c) ** 0.5 - b) / 2 * a
+        # Quadratic formula: t = (-b +/- sqrt(b^2 - 4ac)) / (2a). The denominator was written
+        # "/ 2 * a", which Python evaluates as (x / 2) * a. With a = 0.5 * TARGET_JERK = -0.3
+        # that multiplies by -0.15 instead of dividing by -0.6, so t came out ~11x too small
+        # and max_d with it: 13 m of anticipation instead of 125 m for a 25 -> 15 m/s target.
+        t_a = -1 * ((b**2 - 4 * a * c) ** 0.5 + b) / (2 * a)
+        t_b = ((b**2 - 4 * a * c) ** 0.5 - b) / (2 * a)
         if not isinstance(t_a, complex) and t_a > 0:
           t = t_a
         else:
