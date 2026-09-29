@@ -134,24 +134,6 @@ class VCruiseHelperSP:
 
     return False
 
-  def update_v_cruise_on_gas_override(self, CS: car.CarState) -> None:
-    """Keep the internal set speed with the car while the driver is on the accelerator.
-
-    In ICBM the cruise set speed is openpilot's only longitudinal actuator, and ICBM itself is
-    held inactive for as long as the pedal is down. v_cruise then freezes while the car speeds
-    up: measured up to 23.8 km/h of gap over a single 10 s pull. On lift-off the stock SCC sees
-    a set speed far below the actual speed and brakes, which is not what the driver asked for.
-
-    openpilot already applies exactly this clip, but only on a driver button press - see
-    "If set is pressed while overriding" in selfdrive/car/cruise.py. Here the same clip runs for
-    as long as the pedal is down, with no press required. Non-ICBM cars are untouched.
-    """
-    if self.CP_SP.pcmCruiseSpeed or not CS.gasPressed:
-      return
-
-    self.v_cruise_kph = float(np.clip(max(self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH),
-                                      self.v_cruise_min, V_CRUISE_MAX))
-
   def update_speed_limit_assist_v_cruise_non_pcm(self) -> None:
     if self.sla_state in SLA_ACTIVE_STATES:
       if self.prev_sla_state not in SLA_ACTIVE_STATES or self.update_speed_limit_final_last_changed:

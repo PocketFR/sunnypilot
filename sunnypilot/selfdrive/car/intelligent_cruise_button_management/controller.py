@@ -20,18 +20,19 @@ HYST_GAP = 0.0  # currently disabled; TODO-SP: might need to be brand-specific
 INACTIVE_TIMER = 0.4
 
 # While the driver holds the accelerator, ICBM is held inactive and the set speed freezes as
-# the car speeds up - measured up to 23.8 km/h of gap over a single 10 s pull, and the stock
-# SCC brakes on lift-off to get back down to it. On this platform a SET- press taken while
-# overriding does not decrement: it re-anchors the set speed onto the indicated speed. Logged
-# on 2026-09-24: set speed 32, vEgoCluster 53, one press -> 53. So one press closes the gap
-# that would otherwise cost a five second climb at ~5 km/h/s.
+# the car speeds up. On lift-off the stock SCC then sees a set speed far below the actual speed
+# and brakes, which is not what the driver asked for by pressing the pedal.
 #
-# Deliberately fire-once-and-do-not-insist: if a car does not re-anchor, the single press just
-# decrements by one and nothing worse happens.
-GAS_RESYNC_THRESHOLD = 5   # km/h or mph, gap above which one resync press is worth it
-GAS_RESYNC_REARM = 2       # gap below which we consider the resync done and re-arm
-GAS_RESYNC_PRESS = 0.20    # s; icbm.py emits its burst between t+0.10 and t+0.15 after the
-                           # previous press, so the request must be held across that window
+# A first attempt re-anchored the set speed with a single SET- press, which on this platform
+# snaps it onto the indicated speed. Measured on route 00000354: it fired a dozen times over
+# 57 s of pedal, the gap still reached 21 km/h because a brisk acceleration outruns a stepwise
+# correction, and each snap looked enough like a driver interaction that the speed limit assist
+# dropped out for 16 of those 57 s.
+#
+# So follow the driver up continuously with + instead. No abrupt jump in the set speed, the
+# climb matches the acceleration, and the driver's own set speed - v_cruise - is never touched:
+# on lift-off openpilot returns to what they actually asked for, gradually.
+GAS_FOLLOW_GAP = 2  # km/h or mph, how far below the indicated speed the set speed may sit
 
 
 SEND_BUTTONS = {
@@ -60,8 +61,6 @@ class IntelligentCruiseButtonManagement:
     self.cruise_button_timers = CRUISE_BUTTON_TIMER
 
     self.v_ego_cluster = 0
-    self.gas_resync_armed = True
-    self.gas_resync_frames = 0
 
   @property
   def v_cruise_equal(self) -> bool:
@@ -126,23 +125,13 @@ class IntelligentCruiseButtonManagement:
 
     return send_button
 
-  def update_gas_override_resync(self, CC: car.CarControl) -> custom.IntelligentCruiseButtonManagement.SendButtonState:
-    """One SET- press to re-anchor the set speed while the driver accelerates. See the constants above."""
-    if self.gas_resync_frames > 0:
-      self.gas_resync_frames -= 1
-      return SendButtonState.decrease
-
-    overriding = CC.enabled and CC.cruiseControl.override
-    gap = self.v_ego_cluster - self.v_cruise_cluster
-
-    if not overriding or gap <= GAS_RESYNC_REARM:
-      self.gas_resync_armed = True
+  def update_gas_override_assist(self, CC: car.CarControl) -> custom.IntelligentCruiseButtonManagement.SendButtonState:
+    """Walk the set speed up behind the driver while they accelerate. See GAS_FOLLOW_GAP."""
+    if not (CC.enabled and CC.cruiseControl.override):
       return SendButtonState.none
 
-    if self.gas_resync_armed and gap >= GAS_RESYNC_THRESHOLD:
-      self.gas_resync_armed = False
-      self.gas_resync_frames = int(GAS_RESYNC_PRESS / DT_CTRL) - 1
-      return SendButtonState.decrease
+    if self.v_cruise_cluster < self.v_ego_cluster - GAS_FOLLOW_GAP:
+      return SendButtonState.increase
 
     return SendButtonState.none
 
@@ -165,9 +154,9 @@ class IntelligentCruiseButtonManagement:
 
     self.cruise_button = self.update_state_machine()
 
-    # The state machine yields nothing while overriding, so the resync takes precedence there.
-    resync_button = self.update_gas_override_resync(CC)
-    if resync_button != SendButtonState.none:
-      self.cruise_button = resync_button
+    # The state machine yields nothing while overriding, so the follow takes precedence there.
+    follow_button = self.update_gas_override_assist(CC)
+    if follow_button != SendButtonState.none:
+      self.cruise_button = follow_button
 
     self.is_ready_prev = self.is_ready

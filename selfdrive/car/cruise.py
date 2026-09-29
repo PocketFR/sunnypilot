@@ -55,9 +55,6 @@ class VCruiseHelper(VCruiseHelperSP):
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, _enabled, is_metric)
         self.update_speed_limit_assist_v_cruise_non_pcm()
-        # After the speed limit assist, so that while the driver holds the accelerator their
-        # intent wins over a limit that would otherwise drag the target back down.
-        self.update_v_cruise_on_gas_override(CS)
         self.v_cruise_cluster_kph = self.v_cruise_kph
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
