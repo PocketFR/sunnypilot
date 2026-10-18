@@ -130,6 +130,11 @@ class HudRenderer(Widget):
   def _wheel_color(self, alpha: int) -> rl.Color:
     return rl.Color(255, 255, 255, alpha)
 
+  def _draw_wheel_indicator(self, wheel_txt: rl.Texture, src_rect: rl.Rectangle, dest_rect: rl.Rectangle,
+                            origin: tuple[float, float], rotation: float, alpha: int) -> None:
+    """What occupies the wheel's corner. Overridden to put something else there."""
+    rl.draw_texture_pro(wheel_txt, src_rect, dest_rect, origin, rotation, self._wheel_color(alpha))
+
   def set_wheel_critical_icon(self, critical: bool):
     """Set the wheel icon to critical or normal state."""
     self._show_wheel_critical = critical
@@ -216,8 +221,7 @@ class HudRenderer(Widget):
     origin = (wheel_txt.width / 2, wheel_txt.height / 2)
 
     # color and draw
-    color = self._wheel_color(int(self._wheel_alpha_filter.x))
-    rl.draw_texture_pro(wheel_txt, src_rect, dest_rect, origin, rotation, color)
+    self._draw_wheel_indicator(wheel_txt, src_rect, dest_rect, origin, rotation, int(self._wheel_alpha_filter.x))
 
     if self._show_wheel_critical:
       # Draw exclamation point icon

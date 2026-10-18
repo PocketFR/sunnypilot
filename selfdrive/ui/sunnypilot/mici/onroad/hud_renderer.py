@@ -7,12 +7,16 @@ See the LICENSE.md file in the root directory for more details.
 import pyray as rl
 
 from cereal import custom
-from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
+from openpilot.selfdrive.ui.mici.onroad.hud_renderer import KM_TO_MILE, HudRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.blind_spot_indicators import BlindSpotIndicators
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 SpeedLimitAssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
 _SLA_ACTIVE_STATES = (SpeedLimitAssistState.active, SpeedLimitAssistState.adapting)
+
+# Sized to read at a glance without crowding the turn intent arrows drawn around that spot.
+_SET_SPEED_FONT_SIZE = 56
 
 
 class HudRendererSP(HudRenderer):
@@ -30,6 +34,25 @@ class HudRendererSP(HudRenderer):
 
   def _has_blind_spot_detected(self) -> bool:
     return self.blind_spot_indicators.detected
+
+  def _draw_wheel_indicator(self, wheel_txt: rl.Texture, src_rect: rl.Rectangle, dest_rect: rl.Rectangle,
+                            origin: tuple[float, float], rotation: float, alpha: int) -> None:
+    """The set speed where the wheel would have been green or blue. Every other state is the wheel.
+
+    In ICBM that number has no readout: the car's cluster carries the set speed ICBM rewrites
+    several times a second to steer the stock SCC, and the MAX box shows v_cruise for only the
+    2.5 s that follow a change to it. self.set_speed is that same v_cruise, reused as is.
+    """
+    if self._show_wheel_critical or not ui_state.sm['selfdriveState'].enabled:
+      super()._draw_wheel_indicator(wheel_txt, src_rect, dest_rect, origin, rotation, alpha)
+      return
+
+    set_speed = self.set_speed if ui_state.is_metric else self.set_speed * KM_TO_MILE
+    text = str(round(set_speed))
+    size = measure_text_cached(self._font_bold, text, _SET_SPEED_FONT_SIZE)
+    # dest_rect carries the wheel's centre, since the texture is drawn about its own origin.
+    position = rl.Vector2(dest_rect.x - size.x / 2, dest_rect.y - size.y / 2)
+    rl.draw_text_ex(self._font_bold, text, position, _SET_SPEED_FONT_SIZE, 0, self._wheel_color(alpha))
 
   def _wheel_color(self, alpha: int) -> rl.Color:
     if self._show_wheel_critical:
