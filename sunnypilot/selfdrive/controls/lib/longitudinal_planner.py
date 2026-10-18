@@ -54,6 +54,28 @@ class LongitudinalPlannerSP:
     Same condition as _initialize_intelligent_cruise_button_management in car/interfaces.py."""
     return not self.CP.openpilotLongitudinalControl and not self.CP_SP.pcmCruiseSpeed
 
+  @property
+  def scc_vision_v_target(self) -> float:
+    """The target entered in the sccVision slot: the curvature formula, and in ICBM also the model.
+
+    The model candidate only exists because a button actuator cannot anticipate: its target is
+    the model's own planned speed, which arrives seconds before the curvature formula says
+    anything. With openpilot longitudinal that reasoning no longer holds. Measured on route
+    00000359, 84 % of this candidate's engagements had a radar lead at 31 m median - there the
+    MPC already follows that lead, from the same radar, with its own jerk limits and real
+    braking authority. Clamping v_cruise on top of it would add a second, cruder lead response,
+    and its slow release (2 s hold plus the filter) would delay the resume once the lead clears.
+    The part that is genuinely about the road rather than traffic is what experimental mode does
+    natively, by passing the model's plan through the MPC instead of capping a set speed.
+
+    So the model rides along only while ICBM is the actuator. The curvature formula and the map
+    stay in both modes.
+    """
+    if not self.icbm_is_actuator:
+      return self.scc.vision.output_v_target
+
+    return min(self.scc.vision.output_v_target, self.scc.model.output_v_target)
+
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
     if not self.dec.active():
@@ -94,9 +116,8 @@ class LongitudinalPlannerSP:
       LongitudinalPlanSource.cruise: (v_cruise_candidate, a_ego),
       # The model candidate rides in the sccVision slot: the dict is keyed by enumerant and no
       # enumerant can be added to LongitudinalPlanSource on a prebuilt device. Both read modelV2,
-      # so the grouping is honest; smartCruiseControl.vision.vTarget then reports the pair's min.
-      LongitudinalPlanSource.sccVision: (min(self.scc.vision.output_v_target, self.scc.model.output_v_target),
-                                         self.scc.vision.output_a_target),
+      # so the grouping is honest; see scc_vision_v_target.
+      LongitudinalPlanSource.sccVision: (self.scc_vision_v_target, self.scc.vision.output_a_target),
       LongitudinalPlanSource.sccMap: (self.scc.map.output_v_target, self.scc.map.output_a_target),
       LongitudinalPlanSource.speedLimitAssist: (self.sla.output_v_target, self.sla.output_a_target),
     }
@@ -132,8 +153,8 @@ class LongitudinalPlannerSP:
     # Vision Control
     sccVision = smartCruiseControl.vision
     sccVision.state = self.scc.vision.state
-    # Reports the pair actually entered in the min(), see update_targets.
-    sccVision.vTarget = float(min(self.scc.vision.output_v_target, self.scc.model.output_v_target))
+    # Reports what actually entered the min(), see scc_vision_v_target.
+    sccVision.vTarget = float(self.scc_vision_v_target)
     sccVision.aTarget = float(self.scc.vision.output_a_target)
     sccVision.currentLateralAccel = float(self.scc.vision.current_lat_acc)
     sccVision.maxPredictedLateralAccel = float(self.scc.vision.max_pred_lat_acc)
