@@ -175,6 +175,17 @@ def manager_thread() -> None:
       sentinel_state.arm()
       cloudlog.info("sentry mode armed automatically at ignition off")
 
+    # Codes defaut : le panda n'a qu'un maitre, et le diagnostic demande le mode ELM327.
+    # Au front montant du contact les calculateurs sont reveilles, la voiture est a l'arret
+    # par construction, et pandad peut etre arrete le temps de la lecture - ensure_running le
+    # relance a la fin de ce tour de boucle. Voir obd_dtc.scan_on_ignition. Perdre le battement
+    # ne verrouille rien : set_safety_mode(SAFETY_ELM327) remet heartbeat_lost a zero.
+    if ignition and not ignition_prev:
+      cloudlog.info("dtc: ignition scan, handing the panda over")
+      managed_processes["pandad"].stop(block=True)
+      obd_dtc.scan_on_ignition()
+      cloudlog.info("dtc: ignition scan done, pandad restarting")
+
     # update onroad params, which drives pandad's safety setter thread
     if started != started_prev:
       write_onroad_params(started, params)

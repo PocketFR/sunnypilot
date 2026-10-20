@@ -83,6 +83,9 @@ PIDS = (
   (0x11, "papillon_pct", 1, lambda d: round(d[0] * 100 / 255, 1)),
 )
 SCAN_TIMEOUT = 30.
+# Au contact, le budget borne le temps pendant lequel openpilot n'est pas pret : une lecture
+# complete prend quelques secondes, quinze laissent de la marge sans faire attendre un trajet.
+IGNITION_SCAN_TIMEOUT = 15.
 HANDOVER_DELAY = 1.0
 LETTERS = "PCBU"
 # "2026-03-24 14:46:14 (t+31s 3f2a1c9d) message"
@@ -232,8 +235,13 @@ def _fix_log_times() -> None:
     pass
 
 
+def pending_request() -> bool:
+  """Une demande a ete faite depuis l'ecran et n'a pas encore ete traitee."""
+  return os.path.exists(REQUEST_PATH)
+
+
 def request(action: str) -> None:
-  """'read' ou 'clear', traite au prochain demarrage du manager."""
+  """'read' ou 'clear', traite au prochain demarrage du manager ou au prochain contact."""
   try:
     with open(REQUEST_PATH, "w") as f:
       f.write(action)
@@ -279,12 +287,38 @@ def scan_at_boot(timeout: float = SCAN_TIMEOUT) -> None:
   # openpilot sans redemarrer le systeme, l'horloge est alors deja a l'heure).
   fix_log_when_clock_is_set()
 
+  _scan(timeout)
+
+
+def _scan(timeout: float) -> None:
   if os.path.exists(DISABLE_PATH):
     return
   try:
     subprocess.run([sys.executable, __file__], timeout=timeout, capture_output=True, check=False)
   except Exception:
     pass
+
+
+def scan_on_ignition(timeout: float = IGNITION_SCAN_TIMEOUT) -> None:
+  """Lecture a chaque passage du contact, pour le suivi dans le temps.
+
+  Le demarrage du manager est la seule autre fenetre ou le panda est libre, et elle est
+  mauvaise deux fois : elle tombe contact coupe, et le panda interne n'a pas toujours fini sa
+  propre sequence. Sur le journal reel, 36 % des tentatives echouaient sur « moteur eteint »
+  et 21 % sur un panda indisponible, pour 36 % de releves utiles.
+
+  Au passage du contact les calculateurs repondent et le manager peut rendre le panda
+  proprement. Le front montant tient lieu de garde a l'arret : on ne met pas le contact d'une
+  voiture qui roule.
+
+  A chaque contact et non sur demande : le suivi du melange pauvre a besoin d'une serie dans
+  le temps, pas d'une mesure quand on y pense. Ce que ca coute est borne par `timeout` et
+  paye une fois par trajet. La correction long terme est la valeur apprise par le
+  calculateur : elle est donc lisible des le contact, moteur encore froid ou meme a l'arret -
+  ce qui compte sur un hybride rechargeable, ou le moteur thermique peut ne jamais demarrer.
+  La correction court terme, elle, ne vaut quelque chose que moteur tournant.
+  """
+  _scan(timeout)
 
 
 def _read(uds) -> dict:

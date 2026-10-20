@@ -178,6 +178,52 @@ class TestFreezeFrame:
     assert self.lire({}) == {}
 
 
+class TestIgnitionScan:
+  """La lecture au contact est le seul moment ou les calculateurs repondent : sur le journal
+  reel, 36 % des tentatives echouaient sur « moteur eteint » et 21 % sur un panda
+  indisponible, le panda interne n'ayant pas toujours fini sa sequence au demarrage."""
+
+  @pytest.fixture(autouse=True)
+  def _paths(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(obd_dtc, "REQUEST_PATH", str(tmp_path / "dtc_request"))
+    monkeypatch.setattr(obd_dtc, "DISABLE_PATH", str(tmp_path / "dtc_disable"))
+    self.lances = []
+    monkeypatch.setattr(obd_dtc.subprocess, "run",
+                        lambda *a, **k: self.lances.append(k.get("timeout")))
+
+  def test_every_ignition_is_scanned(self):
+    # le suivi du melange pauvre a besoin d'une serie dans le temps, pas d'une mesure
+    # quand on y pense : aucune demande n'est requise
+    assert not obd_dtc.pending_request()
+    obd_dtc.scan_on_ignition()
+
+    assert self.lances == [obd_dtc.IGNITION_SCAN_TIMEOUT]
+
+  def test_the_ignition_budget_is_shorter_than_the_boot_one(self):
+    # il borne le temps pendant lequel openpilot n'est pas pret, paye a chaque trajet
+    assert obd_dtc.IGNITION_SCAN_TIMEOUT < obd_dtc.SCAN_TIMEOUT
+
+  def test_a_pending_clear_is_honoured_by_the_same_scan(self):
+    obd_dtc.request("clear")
+    assert obd_dtc.pending_request()
+    obd_dtc.scan_on_ignition()
+
+    # un seul scan sert les deux : main() lit la demande et efface si elle le dit
+    assert self.lances == [obd_dtc.IGNITION_SCAN_TIMEOUT]
+
+  def test_the_disable_file_stops_it(self):
+    open(obd_dtc.DISABLE_PATH, "w").close()
+    obd_dtc.scan_on_ignition()
+
+    assert self.lances == []
+
+  def test_the_boot_scan_keeps_its_own_budget(self, monkeypatch):
+    monkeypatch.setattr(obd_dtc, "fix_log_when_clock_is_set", lambda *a, **k: None)
+    obd_dtc.scan_at_boot()
+
+    assert self.lances == [obd_dtc.SCAN_TIMEOUT]
+
+
 class FakePandaDevice(FakePanda):
   """Ajoute ce que _run appelle sur le panda lui-meme."""
 
