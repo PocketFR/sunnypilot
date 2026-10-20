@@ -64,6 +64,24 @@ CLEAR_ECUS = {ENGINE_ECU: "moteur", **CHASSIS_ECUS}
 CLUSTER_ECU = 0x7C6
 ODO_DID = 0xB002
 ODO_OFFSET = 6
+
+# Les modes 01 et 02 partagent le meme jeu de PID : la valeur vivante et la valeur figee a
+# l'instant du defaut se demandent et se decodent de la meme facon (SAE J1979). Le jeu est
+# choisi pour un defaut de melange : les deux corrections de carburant disent ou chercher,
+# le reste donne les conditions dans lesquelles elles ont ete relevees.
+#   (PID, nom, octets attendus, decodage)
+PIDS = (
+  (0x04, "charge_pct", 1, lambda d: round(d[0] * 100 / 255, 1)),
+  (0x05, "liquide_c", 1, lambda d: d[0] - 40),
+  (0x06, "trim_court_pct", 1, lambda d: round((d[0] - 128) * 100 / 128, 1)),
+  (0x07, "trim_long_pct", 1, lambda d: round((d[0] - 128) * 100 / 128, 1)),
+  (0x0B, "collecteur_kpa", 1, lambda d: d[0]),
+  (0x0C, "regime_tr", 2, lambda d: round(((d[0] << 8) | d[1]) / 4)),
+  (0x0D, "vitesse_kmh", 1, lambda d: d[0]),
+  (0x0F, "air_admis_c", 1, lambda d: d[0] - 40),
+  (0x10, "debit_air_gs", 2, lambda d: round(((d[0] << 8) | d[1]) / 100, 2)),
+  (0x11, "papillon_pct", 1, lambda d: round(d[0] * 100 / 255, 1)),
+)
 SCAN_TIMEOUT = 30.
 HANDOVER_DELAY = 1.0
 LETTERS = "PCBU"
@@ -81,6 +99,12 @@ LOG_KEEP_LINES = 400
 
 def dtc_str(b0: int, b1: int) -> str:
   return "%s%d%X%02X" % (LETTERS[(b0 >> 6) & 3], (b0 >> 4) & 3, b0 & 0xF, b1)
+
+
+def _fmt(valeurs: dict) -> str:
+  """Un dictionnaire de mesures en une ligne lisible, dans l'ordre de la table PIDS."""
+  ordre = ["code"] + [nom for _, nom, _, _ in PIDS]
+  return " ".join("%s=%s" % (k, valeurs[k]) for k in ordre if k in valeurs) or "-"
 
 
 def _log(msg: str) -> None:
@@ -283,6 +307,59 @@ def _read(uds) -> dict:
     body = d[1:]
     out[key] = sorted({dtc_str(body[i], body[i + 1]) for i in range(0, len(body) - 3, 4)
                        if body[i + 3] & mask})
+
+  out["live"] = _live_values(uds)
+  out["freeze"] = _freeze_frame(uds)
+  return out
+
+
+def _live_values(uds) -> dict:
+  """Valeurs vivantes du moteur, mode 01. Un PID refuse est simplement absent du resultat.
+
+  Les deux corrections de carburant sont la mesure qui separe les causes d'un melange
+  pauvre : une correction long terme franchement positive au ralenti qui se reduit en
+  charge designe une entree d'air non mesuree, positive surtout en charge elle designe
+  l'alimentation en carburant.
+  """
+  out: dict = {}
+  for pid, nom, taille, decode in PIDS:
+    try:
+      d = uds._uds_request(0x01, subfunction=pid)  # noqa: SLF001
+    except Exception:
+      continue
+    if len(d) >= taille:
+      out[nom] = decode(d)
+  return out
+
+
+def _freeze_frame(uds) -> dict:
+  """Trame figee, mode 02 : les conditions moteur a l'instant ou le defaut a ete memorise.
+
+  C'est l'artefact le plus utile du diagnostic, et chaque effacement le detruit. Il est donc
+  lu a chaque releve, ce qui le fait capturer par la lecture que _run effectue juste avant
+  d'effacer, sans rien changer a la facon de demander un effacement.
+
+  Attention au decalage : la reponse du mode 02 commence par le numero de trame, la ou le
+  mode 01 donne directement la valeur, car _uds_request ne retire que l'identifiant de
+  service et l'echo du PID. D'ou le d[1:].
+  """
+  out: dict = {}
+  try:
+    d = uds._uds_request(0x02, subfunction=0x02, data=b"\x00")  # noqa: SLF001
+  except Exception:
+    return out
+  # Pas de trame tant que rien n'est memorise : le code fige vaut alors zero.
+  if len(d) < 3 or not (d[1] or d[2]):
+    return out
+
+  out["code"] = dtc_str(d[1], d[2])
+  for pid, nom, taille, decode in PIDS:
+    try:
+      d = uds._uds_request(0x02, subfunction=pid, data=b"\x00")  # noqa: SLF001
+    except Exception:
+      continue
+    if len(d) >= 1 + taille:
+      out[nom] = decode(d[1:])
   return out
 
 
@@ -373,13 +450,19 @@ def _run(do_clear: bool) -> dict:
     if do_clear:
       before = sorted(set(status["stored"]) | set(status["confirmed"]) | set(status["pending"]))
       before_chassis = _read_others(p, CHASSIS_ECUS)
+      # La trame figee est detruite par l'effacement, et la relecture qui suit la remplacerait
+      # par une trame vide : on la met de cote avant, c'est tout l'interet de la lire.
+      before_freeze = status.get("freeze") or {}
       status["clear_results"] = _clear(p)
       time.sleep(1.0)
       status.update(_read(uds))
       status["cleared"] = before
       status["cleared_chassis"] = before_chassis
+      status["cleared_freeze"] = before_freeze
       _log("efface %s | moteur : %s | chassis : %s" % (
         status["clear_results"], before or "rien", before_chassis or "rien"))
+      if before_freeze:
+        _log("trame figee effacee, conservee ici : %s" % _fmt(before_freeze))
 
     status["other_ecus"] = _read_others(p, OTHER_ECUS)
 
@@ -464,6 +547,12 @@ def main() -> int:
            status["stored"] or "-", status["pending"] or "-",
            status["confirmed"] or "-", status["failed_since_clear"] or "-",
            status["scc_restored"], status.get("other_ecus") or "-"))
+    # Deux lignes a part plutot qu'une ligne a rallonge : les mesures se relisent en colonne
+    # d'un releve a l'autre, et une trame figee doit sauter aux yeux quand elle existe.
+    if status.get("live"):
+      _log("  moteur : %s" % _fmt(status["live"]))
+    if status.get("freeze"):
+      _log("  trame figee : %s" % _fmt(status["freeze"]))
   else:
     _log("lecture impossible : %s" % status["error"])
   return 0

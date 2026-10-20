@@ -16,9 +16,11 @@ SCC, ABS, EPS, ENGINE = obd_dtc.SCC_ECU, obd_dtc.ABS_ECU, obd_dtc.EPS_ECU, obd_d
 class FakePanda:
   """Panda minimal pour UdsClient : repond en ISO-TP trame simple, ou se tait."""
 
-  def __init__(self, answering, dtcs=None):
+  def __init__(self, answering, dtcs=None, pids=None, freeze=None):
     self.answering = set(answering)
     self.dtcs = dtcs or {}  # {adresse: [(octet0, octet1)]}, un code au plus (trame simple)
+    self.pids = pids or {}      # mode 01 : {pid: octets de donnees}
+    self.freeze = dict(freeze or {})  # mode 02 : idem, 0x02 portant le code qui a fige
     self.sent: list[tuple[int, bytes, int]] = []
     self._queue: list[tuple[int, bytes, int]] = []
 
@@ -40,11 +42,18 @@ class FakePanda:
     if sid in (SERVICE_TYPE.TESTER_PRESENT, SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL,
                SERVICE_TYPE.COMMUNICATION_CONTROL):
       return bytes([sid + 0x40, dat[2]])
-    if sid == 0x01:  # OBD mode 01 : voyant moteur eteint, aucun code
-      return bytes([0x41, dat[2], 0x00, 0x07, 0xE5, 0x00])
+    if sid == 0x01:  # OBD mode 01
+      if dat[2] in self.pids:
+        return bytes([0x41, dat[2]]) + self.pids[dat[2]]
+      return bytes([0x41, dat[2], 0x00, 0x07, 0xE5, 0x00])  # voyant eteint, aucun code
+    if sid == 0x02:  # OBD mode 02 : la reponse porte le numero de trame avant la valeur
+      if dat[2] in self.freeze:
+        return bytes([0x42, dat[2], 0x00]) + self.freeze[dat[2]]
+      return None
     if sid in (0x03, 0x07):  # OBD modes 03 / 07 : aucun code
       return bytes([sid + 0x40, 0x00])
     if sid == SERVICE_TYPE.CLEAR_DIAGNOSTIC_INFORMATION:
+      self.freeze = {}   # un vrai calculateur perd sa trame figee en effacant
       return bytes([sid + 0x40])
     if sid == SERVICE_TYPE.READ_DTC_INFORMATION:
       records = b"".join(bytes([b0, b1, 0x00, 0x08]) for b0, b1 in self.dtcs.get(addr, []))
@@ -100,11 +109,80 @@ class TestClear:
     assert spared and all(not p.requests_to(addr) for addr in spared)
 
 
+class TestLiveValues:
+  """Mode 01 : les corrections de carburant sont la mesure qui separe les causes d'un
+  melange pauvre, le reste donne les conditions du releve."""
+
+  def lire(self, pids):
+    from opendbc.car.uds import UdsClient
+    p = FakePanda([ENGINE], pids=pids)
+    return obd_dtc._live_values(UdsClient(p, ENGINE, bus=obd_dtc.BUS, timeout=0.1, tx_timeout=0.1))
+
+  def test_the_fuel_trims_are_decoded_around_their_zero(self):
+    # 0x80 est le zero des corrections, 0x90 vaut +12,5 % (SAE J1979)
+    vals = self.lire({0x06: b"\x80", 0x07: b"\x90"})
+
+    assert vals["trim_court_pct"] == 0.0
+    assert vals["trim_long_pct"] == 12.5
+
+  def test_a_negative_trim_comes_out_negative(self):
+    assert self.lire({0x07: b"\x70"})["trim_long_pct"] == -12.5
+
+  def test_two_byte_pids_are_read_as_two_bytes(self):
+    vals = self.lire({0x0C: b"\x0f\xa0", 0x10: b"\x09\xc4"})
+
+    assert vals["regime_tr"] == 1000       # ((0x0f << 8) | 0xa0) / 4
+    assert vals["debit_air_gs"] == 25.0    # 2500 / 100
+
+  def test_temperatures_carry_their_offset(self):
+    vals = self.lire({0x05: b"\x5a", 0x0F: b"\x28"})
+
+    assert vals["liquide_c"] == 50         # 0x5a - 40
+    assert vals["air_admis_c"] == 0
+
+  def test_a_refused_pid_is_simply_absent(self):
+    vals = self.lire({0x06: b"\x80"})
+
+    assert "trim_court_pct" in vals
+    # le faux calculateur repond a tout en mode 01, mais sur deux octets seulement pour
+    # les PID qui en demandent deux : ceux-la sont ecartes plutot que mal decodes
+    assert set(vals) <= {nom for _, nom, _, _ in obd_dtc.PIDS}
+
+
+class TestFreezeFrame:
+  """Mode 02 : les conditions moteur a l'instant du defaut, detruites par chaque effacement."""
+
+  def lire(self, freeze):
+    from opendbc.car.uds import UdsClient
+    p = FakePanda([ENGINE], freeze=freeze)
+    return obd_dtc._freeze_frame(UdsClient(p, ENGINE, bus=obd_dtc.BUS, timeout=0.1, tx_timeout=0.1))
+
+  def test_it_says_which_code_froze_the_frame(self):
+    frame = self.lire({0x02: b"\x01\x71"})
+
+    assert frame["code"] == "P0171"
+
+  def test_the_frame_number_is_not_mistaken_for_the_value(self):
+    # La reponse du mode 02 est 42 <PID> <numero de trame> <valeur> : sans le decalage,
+    # on lirait le numero de trame, soit zero, au lieu de la mesure.
+    frame = self.lire({0x02: b"\x01\x71", 0x07: b"\x90", 0x0C: b"\x0f\xa0"})
+
+    assert frame["trim_long_pct"] == 12.5
+    assert frame["regime_tr"] == 1000
+
+  def test_no_frame_when_nothing_is_stored(self):
+    # Le code fige vaut zero tant qu'aucun defaut n'est memorise.
+    assert self.lire({0x02: b"\x00\x00", 0x07: b"\x90"}) == {}
+
+  def test_an_ecu_without_mode_02_is_not_an_error(self):
+    assert self.lire({}) == {}
+
+
 class FakePandaDevice(FakePanda):
   """Ajoute ce que _run appelle sur le panda lui-meme."""
 
-  def __init__(self, answering, dtcs=None):
-    super().__init__(answering, dtcs)
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
     self.calls: list[str] = []
 
   def set_safety_mode(self, mode):
@@ -119,7 +197,10 @@ class FakePandaDevice(FakePanda):
 
 @pytest.fixture
 def fake_panda(monkeypatch, tmp_path):
-  device = FakePandaDevice(set(obd_dtc.OTHER_ECUS) | {obd_dtc.ENGINE_ECU}, dtcs={obd_dtc.SCC_ECU: [(0x56, 0x38)]})
+  device = FakePandaDevice(set(obd_dtc.OTHER_ECUS) | {obd_dtc.ENGINE_ECU},
+                           dtcs={obd_dtc.SCC_ECU: [(0x56, 0x38)]},
+                           pids={0x07: b"\x90"},
+                           freeze={0x02: b"\x01\x71", 0x07: b"\x90"})
   monkeypatch.setitem(sys.modules, "panda", types.SimpleNamespace(Panda=lambda: device))
   monkeypatch.setattr(obd_dtc.time, "sleep", lambda _: None)
   monkeypatch.setattr(obd_dtc, "LOG_PATH", str(tmp_path / "dtc_log.txt"))
@@ -146,6 +227,21 @@ class TestRun:
 
     assert status["clear_results"] == {"moteur": True, "scc": True, "abs": True, "eps": True}
     assert status["cleared_chassis"] == {"scc": ["C1638"]}
+
+  def test_the_frozen_frame_survives_the_clear(self, fake_panda):
+    """Tout l'interet de la lire : l'effacement la detruit, et la relecture qui suit la
+    remplacerait par une trame vide."""
+    status = obd_dtc._run(do_clear=True)
+
+    assert status["cleared_freeze"]["code"] == "P0171"
+    assert status["cleared_freeze"]["trim_long_pct"] == 12.5
+    assert not status["freeze"]        # le calculateur l'a bien perdue
+
+  def test_a_read_without_clearing_keeps_the_frame_in_place(self, fake_panda):
+    status = obd_dtc._run(do_clear=False)
+
+    assert status["freeze"]["code"] == "P0171"
+    assert status["live"]["trim_long_pct"] == 12.5
 
   def test_hands_the_panda_back(self, fake_panda):
     obd_dtc._run(do_clear=False)
