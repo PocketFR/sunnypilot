@@ -175,6 +175,16 @@ def manager_thread() -> None:
       sentinel_state.arm()
       cloudlog.info("sentry mode armed automatically at ignition off")
 
+    # Et au contact coupe, pour les mesures : le moteur thermique vient eventuellement de
+    # tourner, donc la correction long terme est celle qui vient d'etre apprise en charge,
+    # alors qu'au contact mis le moteur a eu la nuit pour refroidir. Le delai ne coute rien
+    # ici, personne n'attend. Voir obd_dtc.scan_on_ignition_off.
+    if ignition_prev and not ignition:
+      cloudlog.info("dtc: ignition-off scan, handing the panda over")
+      managed_processes["pandad"].stop(block=True)
+      obd_dtc.scan_on_ignition_off()
+      cloudlog.info("dtc: ignition-off scan done, pandad restarting")
+
     # Codes defaut : le panda n'a qu'un maitre, et le diagnostic demande le mode ELM327.
     # Au front montant du contact les calculateurs sont reveilles, la voiture est a l'arret
     # par construction, et pandad peut etre arrete le temps de la lecture - ensure_running le

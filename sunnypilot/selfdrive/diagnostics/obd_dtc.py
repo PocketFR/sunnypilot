@@ -287,14 +287,17 @@ def scan_at_boot(timeout: float = SCAN_TIMEOUT) -> None:
   # openpilot sans redemarrer le systeme, l'horloge est alors deja a l'heure).
   fix_log_when_clock_is_set()
 
-  _scan(timeout)
+  _scan(timeout, "demarrage")
 
 
-def _scan(timeout: float) -> None:
+def _scan(timeout: float, origine: str = "") -> None:
+  """`origine` est reportee dans le journal : une serie de corrections ne se lit qu'en
+  sachant a quel moment chaque point a ete pris."""
   if os.path.exists(DISABLE_PATH):
     return
+  cmd = [sys.executable, __file__] + ([origine] if origine else [])
   try:
-    subprocess.run([sys.executable, __file__], timeout=timeout, capture_output=True, check=False)
+    subprocess.run(cmd, timeout=timeout, capture_output=True, check=False)
   except Exception:
     pass
 
@@ -318,7 +321,27 @@ def scan_on_ignition(timeout: float = IGNITION_SCAN_TIMEOUT) -> None:
   ce qui compte sur un hybride rechargeable, ou le moteur thermique peut ne jamais demarrer.
   La correction court terme, elle, ne vaut quelque chose que moteur tournant.
   """
-  _scan(timeout)
+  _scan(timeout, "contact")
+
+
+def scan_on_ignition_off(timeout: float = IGNITION_SCAN_TIMEOUT) -> None:
+  """Lecture au contact coupe : le seul moment ou les corrections valent quelque chose.
+
+  Mesure sur les deux premiers releves pris au contact mis : liquide a 16 et 18 °C pour un air
+  admis a 14 et 15, regime et charge nuls, collecteur a la pression atmospherique. Le moteur
+  thermique avait eu toute la nuit pour refroidir, et la correction long terme lue - 4,7 % -
+  est celle de la cellule de ralenti, pas celle du point ou le defaut se declenche.
+
+  Ici le moteur vient eventuellement de tourner : le liquide est encore chaud et la correction
+  est celle qui vient d'etre apprise en charge. La temperature du liquide sert de juge, au-dela
+  de 70 °C la ligne est exploitable. En dessous, le trajet s'est fait en electrique et la
+  ligne n'apprend rien - ce qui est une information en soi sur un hybride rechargeable.
+
+  Le delai ne coute rien ici, personne n'attend qu'openpilot soit pret. Le risque est a
+  l'autre bout : les calculateurs s'endorment vite contact coupe, et le journal dira si la
+  fenetre est trop courte - les lignes porteraient alors « moteur eteint ».
+  """
+  _scan(timeout, "coupure")
 
 
 def _read(uds) -> dict:
@@ -552,6 +575,7 @@ def _keep_previous_if_engine_off(status: dict) -> dict:
 
 
 def main() -> int:
+  origine = sys.argv[1] if len(sys.argv) > 1 else ""
   action = ""
   try:
     with open(REQUEST_PATH) as f:
@@ -565,6 +589,7 @@ def main() -> int:
       pass
 
   status = _keep_previous_if_engine_off(_run(do_clear=(action == "clear")))
+  status["origin"] = origine
   try:
     with open(STATUS_PATH, "w") as f:
       json.dump(status, f)
@@ -572,11 +597,13 @@ def main() -> int:
     pass
 
   if status.get("attempt", {}).get("engine_off"):
-    _log("moteur eteint, rien a lire : on garde le releve du %s"
-         % time.strftime(TIME_FORMAT, time.localtime(status.get("time", 0))))
+    _log("%smoteur eteint, rien a lire : on garde le releve du %s"
+         % ("[%s] " % origine if origine else "",
+            time.strftime(TIME_FORMAT, time.localtime(status.get("time", 0)))))
   elif status["ok"]:
-    _log("%s km | voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s "
+    _log("%s%s km | voyant=%s memorises=%s en_attente=%s confirmes=%s echoues_depuis_effacement=%s "
          "scc_reactive=%s autres=%s" % (
+           "[%s] " % origine if origine else "",
            status.get("odometer_km", "?"), "ALLUME" if status["mil"] else "eteint",
            status["stored"] or "-", status["pending"] or "-",
            status["confirmed"] or "-", status["failed_since_clear"] or "-",
@@ -588,7 +615,7 @@ def main() -> int:
     if status.get("freeze"):
       _log("  trame figee : %s" % _fmt(status["freeze"]))
   else:
-    _log("lecture impossible : %s" % status["error"])
+    _log("%slecture impossible : %s" % ("[%s] " % origine if origine else "", status["error"]))
   return 0
 
 

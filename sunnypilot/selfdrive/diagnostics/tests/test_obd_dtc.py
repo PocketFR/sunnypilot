@@ -189,7 +189,7 @@ class TestIgnitionScan:
     monkeypatch.setattr(obd_dtc, "DISABLE_PATH", str(tmp_path / "dtc_disable"))
     self.lances = []
     monkeypatch.setattr(obd_dtc.subprocess, "run",
-                        lambda *a, **k: self.lances.append(k.get("timeout")))
+                        lambda cmd, **k: self.lances.append((k.get("timeout"), cmd[2:])))
 
   def test_every_ignition_is_scanned(self):
     # le suivi du melange pauvre a besoin d'une serie dans le temps, pas d'une mesure
@@ -197,7 +197,7 @@ class TestIgnitionScan:
     assert not obd_dtc.pending_request()
     obd_dtc.scan_on_ignition()
 
-    assert self.lances == [obd_dtc.IGNITION_SCAN_TIMEOUT]
+    assert self.lances == [(obd_dtc.IGNITION_SCAN_TIMEOUT, ["contact"])]
 
   def test_the_ignition_budget_is_shorter_than_the_boot_one(self):
     # il borne le temps pendant lequel openpilot n'est pas pret, paye a chaque trajet
@@ -209,7 +209,7 @@ class TestIgnitionScan:
     obd_dtc.scan_on_ignition()
 
     # un seul scan sert les deux : main() lit la demande et efface si elle le dit
-    assert self.lances == [obd_dtc.IGNITION_SCAN_TIMEOUT]
+    assert self.lances == [(obd_dtc.IGNITION_SCAN_TIMEOUT, ["contact"])]
 
   def test_the_disable_file_stops_it(self):
     open(obd_dtc.DISABLE_PATH, "w").close()
@@ -217,11 +217,26 @@ class TestIgnitionScan:
 
     assert self.lances == []
 
+  def test_the_ignition_off_scan_is_the_one_that_measures(self):
+    """Au contact mis le moteur a eu la nuit pour refroidir : mesure sur les deux premiers
+    releves, liquide a 16 et 18 °C pour un air admis a 14 et 15. Au contact coupe il vient
+    eventuellement de tourner, et la correction est celle apprise en charge."""
+    obd_dtc.scan_on_ignition_off()
+
+    assert self.lances == [(obd_dtc.IGNITION_SCAN_TIMEOUT, ["coupure"])]
+
+  def test_each_moment_is_named_in_the_log(self):
+    # une serie de corrections ne se lit qu'en sachant a quel moment chaque point a ete pris
+    obd_dtc.scan_on_ignition()
+    obd_dtc.scan_on_ignition_off()
+
+    assert [args for _, args in self.lances] == [["contact"], ["coupure"]]
+
   def test_the_boot_scan_keeps_its_own_budget(self, monkeypatch):
     monkeypatch.setattr(obd_dtc, "fix_log_when_clock_is_set", lambda *a, **k: None)
     obd_dtc.scan_at_boot()
 
-    assert self.lances == [obd_dtc.SCAN_TIMEOUT]
+    assert self.lances == [(obd_dtc.SCAN_TIMEOUT, ["demarrage"])]
 
 
 class FakePandaDevice(FakePanda):
