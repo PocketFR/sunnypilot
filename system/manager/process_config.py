@@ -28,6 +28,11 @@ def sentinel(started: bool, params: Params, CP: car.CarParams) -> bool:
   # ou une cle ajoutee a params_keys.h est inconnue (voir sentinel/state.py).
   return sentinel_state.is_armed() and not started
 
+def sentinel_recording(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # L'encodeur materiel, uniquement pendant un evenement de la sentinelle : voir
+  # state.mark_recording. Hors evenement il est arrete, et ne coute rien a la batterie.
+  return sentinel(started, params, CP) and sentinel_state.is_recording()
+
 def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.notCar
 
@@ -120,7 +125,7 @@ procs = [
   DaemonProcess("manage_athenad", "system.athena.manage_athenad", "AthenadPid"),
 
   NativeProcess("loggerd", "system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], only_onroad),
+  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], or_(only_onroad, sentinel_recording)),
   NativeProcess("stream_encoderd", "system/loggerd", ["./encoderd", "--stream"], notcar),
   PythonProcess("logmessaged", "system.logmessaged", always_run),
 

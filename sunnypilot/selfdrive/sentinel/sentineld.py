@@ -31,6 +31,8 @@ from collections import deque
 
 import numpy as np
 
+from typing import BinaryIO
+
 from openpilot.sunnypilot.selfdrive.common.boot_time import (TIME_FORMAT, TIME_SLACK, boot_id,
                                                              clock_is_set, real_time)
 from openpilot.sunnypilot.selfdrive.sentinel import state
@@ -114,6 +116,13 @@ POST_EVENT_S = 20.        # on continue a enregistrer apres le dernier declenche
 MIN_FREE_PERCENT = 8.
 LOW_VOLTAGE_S = 60.       # duree sous le seuil avant de s'arreter
 JPEG_QUALITY = 80
+
+# Flux encodes par encoderd, et drapeau d'image cle de V4L2. Le GOP vaut 20 images a
+# 20 img/s (system/loggerd/loggerd.h, MainEncoderSettings) : une image cle par seconde,
+# donc un fichier peut toujours s'ouvrir sur une image cle sans perdre plus d'une seconde.
+ENCODE_SOCKETS = {"f": "roadEncodeData", "e": "wideRoadEncodeData", "d": "driverEncodeData"}
+V4L2_BUF_FLAG_KEYFRAME = 8
+ENCODE_TIMEOUT_MS = 200   # au-dela, le fil repasse voir si l'evenement est toujours ouvert
 
 # Releve de consommation : l'appareil mesure lui-meme la puissance tiree de la voiture
 # (/sys/class/hwmon/hwmon1/power1_input). Une ligne toutes les 30 s suffit a tracer une
@@ -227,12 +236,123 @@ def dir_size(path: str) -> int:
   return total
 
 
+class HevcWriter:
+  """Ecrit les flux HEVC pleine cadence pendant un evenement, sans encoder en continu.
+
+  A une image par seconde on peut manquer le visage de quelqu'un selon la facon dont il
+  se tourne. L'encodeur materiel resout ca a 20 img/s, et pour trois fois moins d'octets
+  par image que le JPEG (mesure sur des fichiers reels : 30,8 ko contre 88,2 ko).
+  Monter la cadence du JPEG etait exclu : 47 ms par image et par camera, soit 70 % d'un
+  coeur a 5 img/s et 2,8 coeurs a 20.
+
+  encoderd n'est demarre que sur declenchement, par le drapeau state.mark_recording et la
+  porte sentinel_recording. La pre-memoire reste en JPEG : c'est exactement son role, et
+  elle couvre la seconde que le manager met a lever le processus.
+
+  Un fil par camera, comme pour le son : a 2 Hz la boucle principale ne viderait pas les
+  files assez vite pour 60 paquets par seconde, et le flux serait troue.
+  """
+
+  def __init__(self, cameras: dict[str, str] | None = None):
+    self.sockets = ENCODE_SOCKETS if cameras is None else cameras
+    self.lock = threading.Lock()
+    self.files: dict[str, BinaryIO] = {}
+    self.path: str | None = None
+    self.waiting: set[str] = set()     # cameras en attente d'une image cle
+    self.frames: dict[str, int] = {}
+    self.dropped: dict[str, int] = {}
+    self.stopped = False
+    self.threads: list[threading.Thread] = []
+
+  def start(self) -> None:
+    """Les fils tournent en permanence : ils ne recoivent rien tant que encoderd dort."""
+    for cam in self.sockets:
+      t = threading.Thread(target=self._read, args=(cam,), daemon=True)
+      t.start()
+      self.threads.append(t)
+
+  def open(self, path: str) -> None:
+    """Declare l'evenement. Aucun fichier n'est cree ici : le premier paquet utile le fera.
+
+    Si encoderd ne se leve pas, ou pas a temps, il ne reste donc aucun fichier vide a
+    ramasser - et rien n'est ouvert du tout quand personne ne publie, par exemple sous les
+    tests.
+    """
+    with self.lock:
+      self._close_files()
+      self.path = path
+      self.waiting = set(self.sockets)
+      self.frames = {cam: 0 for cam in self.sockets}
+      self.dropped = {cam: 0 for cam in self.sockets}
+
+  def close(self) -> dict[str, int]:
+    with self.lock:
+      ecrites = dict(self.frames)
+      self._close_files()
+      self.path = None
+      self.waiting = set()
+      return ecrites
+
+  def _close_files(self) -> None:
+    for f in self.files.values():
+      try:
+        f.close()
+      except Exception:
+        pass
+    self.files = {}
+
+  def stop(self) -> None:
+    self.stopped = True
+    self.close()
+
+  def _read(self, cam: str) -> None:
+    import cereal.messaging as messaging
+
+    nom = self.sockets[cam]
+    sock = messaging.sub_sock(nom, conflate=False, timeout=ENCODE_TIMEOUT_MS)
+    while not self.stopped:
+      try:
+        msg = messaging.recv_one(sock)
+      except Exception:
+        continue
+      if msg is None:
+        continue
+      self.handle(cam, getattr(msg, nom))
+
+  def handle(self, cam: str, edata) -> None:
+    """Un paquet encode : ouvre le fichier sur la premiere image cle, puis ecrit."""
+    with self.lock:
+      if self.path is None:
+        return
+      f = self.files.get(cam)
+      if f is None:
+        # Sans l'entete VPS/SPS/PPS, et sans demarrer sur une image cle, le fichier est
+        # illisible : meme regle que write_encode_data dans system/loggerd/loggerd.cc.
+        # Le GOP valant une seconde, l'attente ne coute jamais plus que ca.
+        if not (edata.idx.flags & V4L2_BUF_FLAG_KEYFRAME):
+          self.dropped[cam] = self.dropped.get(cam, 0) + 1
+          return
+        try:
+          f = open(os.path.join(self.path, "%s.hevc" % cam), "wb")
+          f.write(edata.header)
+        except OSError:
+          return
+        self.files[cam] = f
+        self.waiting.discard(cam)
+      try:
+        f.write(edata.data)
+      except OSError:
+        return
+      self.frames[cam] = self.frames.get(cam, 0) + 1
+
+
 class EventRecorder:
   """Ouvre un dossier par evenement, y deverse la pre-memoire puis les images suivantes."""
 
   def __init__(self, root: str = SENTRY_DIR, pre_roll: int = PRE_ROLL, post_event_s: float = POST_EVENT_S,
-               max_event_s: float = MAX_EVENT_S):
+               max_event_s: float = MAX_EVENT_S, video: HevcWriter | None = None):
     self.root, self.post_event_s, self.max_event_s = root, post_event_s, max_event_s
+    self.video = video
     self.buffers: dict[str, deque] = {cam: deque(maxlen=pre_roll) for cam in CAMERAS}
     # le son garde sa propre memoire : dix secondes, comme les images, mais en continu
     self.audio: deque = deque(maxlen=int(AUDIO_PRE_ROLL * AUDIO_RATE / AUDIO_CHUNK))
@@ -304,6 +424,11 @@ class EventRecorder:
     self.path = event_path(self.root, self.started_at)
     os.makedirs(self.path, exist_ok=True)  # cree aussi le dossier du jour
     self.index, self.frames = 0, 0
+    # Le drapeau avant tout le reste : c'est lui qui fait lever encoderd, et chaque
+    # dixieme de seconde gagne est de la video en plus au debut de l'evenement.
+    state.mark_recording()
+    if self.video is not None:
+      self.video.open(self.path)
     self._write_meta(self._meta())
 
     self._open_wav()
@@ -374,6 +499,11 @@ class EventRecorder:
     self._close_wav()
     meta = self._meta()
     meta["closed"] = time.time()
+    if self.video is not None:
+      # Compte par camera : un zero signale que encoderd n'a pas eu le temps de se lever,
+      # ou qu'il n'a pas demarre du tout.
+      meta["hevc"] = self.video.close()
+    state.clear_recording()
     self._write_meta(meta)
     self.path, self.triggers, self.details, self.index = None, [], {}, 0
     return path
@@ -767,7 +897,8 @@ class Sentry:
   trames lui sont donnees par la boucle principale, ce qui permet de la tester seule."""
 
   def __init__(self, root: str = SENTRY_DIR):
-    self.recorder = EventRecorder(root)
+    self.video = HevcWriter()
+    self.recorder = EventRecorder(root, video=self.video)
     self.motion = {cam: MotionDetector(cam) for cam in MOTION_CAMERAS}
     self.can = CanWatch()
     self.shock = ShockDetector()
@@ -884,6 +1015,8 @@ def finish(sentry) -> bool:
   """
   sentry.audio.stop()
   sentry.recorder.close()
+  sentry.video.stop()
+  state.clear_recording()
   state.clear_running()
   if sentry.stop_reason in ("ignition", "voltage"):
     state.disarm()
@@ -931,9 +1064,12 @@ def main() -> None:
     return total, som
 
   sentry = Sentry()
+  sentry.video.start()   # les fils de lecture des flux encodes, inutiles aux tests
   # marqueur laisse en place par la veille precedente = elle ne s'est pas arretee d'elle-meme
   power_cut = state.was_running()
   state.mark_running()
+  # Un drapeau laisse par une veille coupee net garderait encoderd en marche pour rien.
+  state.clear_recording()
   sentry.on_boot(time.monotonic(), power_cut)
 
   sm = messaging.SubMaster(["can", "pandaStates", "peripheralState"])

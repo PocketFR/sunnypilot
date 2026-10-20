@@ -22,6 +22,14 @@ class Frame:
     self.address, self.dat, self.src = address, dat, src
 
 
+class Encoded:
+  """Un paquet tel que le publie encoderd : l'entete, les octets, et le drapeau V4L2."""
+
+  def __init__(self, data=b"image", header=b"vps-sps-pps", key=False):
+    self.data, self.header = data, header
+    self.idx = type("Idx", (), {"flags": sentineld.V4L2_BUF_FLAG_KEYFRAME if key else 0})()
+
+
 def walking(step, width=160, height=120, box=(20, 100, 10, 58), stride=48):
   """Une silhouette qui avance d'une image a l'autre : du mouvement qui dure.
 
@@ -670,6 +678,128 @@ class TestPerCameraSettings:
     s = sentineld.Sentry(str(tmp_path / "ev"))
 
     assert s.motion["d"].area != s.motion["f"].area
+
+
+class TestHevcWriter:
+  """Video pleine cadence pendant un evenement : une image par seconde laisse passer un
+  visage selon la facon dont la personne se tourne."""
+
+  def writer(self, tmp_path):
+    w = sentineld.HevcWriter()
+    w.open(str(tmp_path))
+    return w
+
+  def test_nothing_is_written_before_an_event(self, tmp_path):
+    w = sentineld.HevcWriter()
+    w.handle("f", Encoded(key=True))
+
+    assert os.listdir(tmp_path) == []
+    assert w.frames == {}
+
+  def test_a_file_only_appears_on_a_key_frame(self, tmp_path):
+    w = self.writer(tmp_path)
+    w.handle("f", Encoded(key=False))
+
+    # encoderd vient de se lever : tant qu'aucune image cle n'est passee, un fichier
+    # serait illisible, donc il n'est pas cree du tout.
+    assert os.listdir(tmp_path) == []
+    assert w.dropped["f"] == 1
+    w.close()
+
+  def test_the_header_comes_first_then_the_images(self, tmp_path):
+    w = self.writer(tmp_path)
+    w.handle("f", Encoded(data=b"cle", header=b"entete", key=True))
+    w.handle("f", Encoded(data=b"suite", key=False))
+    ecrites = w.close()
+
+    with open(os.path.join(tmp_path, "f.hevc"), "rb") as f:
+      assert f.read() == b"entetecle" + b"suite"
+    assert ecrites["f"] == 2
+
+  def test_each_camera_has_its_own_file(self, tmp_path):
+    w = self.writer(tmp_path)
+    for cam in ("f", "e", "d"):
+      w.handle(cam, Encoded(key=True))
+    w.close()
+
+    assert sorted(os.listdir(tmp_path)) == ["d.hevc", "e.hevc", "f.hevc"]
+
+  def test_a_camera_that_said_nothing_leaves_no_file(self, tmp_path):
+    w = self.writer(tmp_path)
+    w.handle("f", Encoded(key=True))
+    w.close()
+
+    assert os.listdir(tmp_path) == ["f.hevc"]
+
+  def test_the_next_event_starts_a_new_file(self, tmp_path):
+    w = self.writer(tmp_path)
+    w.handle("f", Encoded(data=b"premier", key=True))
+    w.close()
+
+    second = tmp_path / "second"
+    second.mkdir()
+    w.open(str(second))
+    w.handle("f", Encoded(data=b"deuxieme", key=True))
+    w.close()
+
+    with open(os.path.join(second, "f.hevc"), "rb") as f:
+      assert b"deuxieme" in f.read()
+    assert w.frames["f"] == 1
+
+  def test_writing_stops_once_the_event_is_closed(self, tmp_path):
+    w = self.writer(tmp_path)
+    w.close()
+    w.handle("f", Encoded(key=True))
+
+    assert os.listdir(tmp_path) == []
+
+
+class TestEncoderOnDemand:
+  """L'encodeur materiel ne tourne que pendant un evenement : sur 61,3 h d'armement
+  mesurees, l'appareil n'enregistre que 0,48 % du temps, et la batterie ne se recharge
+  pas."""
+
+  @pytest.fixture(autouse=True)
+  def _flag(self, monkeypatch, tmp_path):
+    monkeypatch.setattr(state, "RECORDING_PATH", str(tmp_path / "sentry_recording"))
+
+  def test_the_flag_follows_the_event(self, tmp_path):
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), video=sentineld.HevcWriter())
+    assert not state.is_recording()
+
+    rec.trigger("motion", time.monotonic())
+    assert state.is_recording()
+
+    rec.close()
+    assert not state.is_recording()
+
+  def test_the_frame_count_lands_in_the_event_details(self, tmp_path):
+    w = sentineld.HevcWriter()
+    rec = sentineld.EventRecorder(str(tmp_path / "ev"), video=w)
+    rec.trigger("motion", time.monotonic())
+    w.handle("f", Encoded(key=True))
+    path = rec.path
+    rec.close()
+
+    with open(os.path.join(path, "meta.json")) as f:
+      meta = json.load(f)
+    # un zero signalerait que encoderd n'a pas eu le temps de se lever
+    assert meta["hevc"]["f"] == 1
+
+  def test_the_gate_opens_only_while_an_event_runs(self, armed, monkeypatch):
+    pytest.importorskip("capnp")
+    from openpilot.system.manager import process_config
+
+    monkeypatch.setattr(process_config.sentinel_state, "RECORDING_PATH", state.RECORDING_PATH)
+    gate = process_config.sentinel_recording
+
+    assert not gate(False, None, None)
+    state.mark_recording()
+    assert gate(False, None, None)
+    # en roulant la sentinelle n'a pas la main : encoderd y est deja demarre par ailleurs
+    assert not gate(True, None, None)
+    state.clear_recording()
+    assert not gate(False, None, None)
 
 
 class TestProcessConfig:
